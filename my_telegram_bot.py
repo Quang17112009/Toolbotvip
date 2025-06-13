@@ -5,9 +5,7 @@ from datetime import datetime
 from collections import defaultdict, Counter
 import requests
 import asyncio
-# from telegram import Update # Không còn dùng
-# from telegram.ext import Application, CommandHandler, ContextTypes # Không còn dùng
-import telebot # Thư viện mới
+import telebot # Thư viện pyTelegramBotAPI
 
 # ==== CẤU HÌNH ====
 HTTP_API_URL = "https://apisunwin.up.railway.app/api/taixiu"
@@ -21,7 +19,7 @@ MAX_PATTERN_LENGTH = 15   # Độ dài tối đa của pattern để được xe
 AI_LEARN_THRESHOLD_COUNT = 5 # Số lần xuất hiện tối thiểu của pattern để AI 2 xem xét học
 AI_LEARN_THRESHOLD_RATE = 75 # Tỷ lệ chính xác tối thiểu (%) để AI 2 học pattern
 
-# --- MÀU SẮC CHO CONSOLE (Không còn dùng trực tiếp cho Telegram, nhưng giữ lại cho debug console) ---
+# --- MÀU SẮC CHO CONSOLE ---
 RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, RESET, BOLD = "\033[91m", "\033[92m", "\033[93m", "\033[94m", "\033[95m", "\033[96m", "\033[0m", "\033[1m"
 
 # ==== BIẾN TOÀN CỤC ====
@@ -32,11 +30,10 @@ cau_dudoan = {} # Lưu các pattern từ DUDOAN_FILE (AI 1)
 cau_ai = {}     # Lưu các pattern từ AI_FILE (AI 2)
 win_rate_tracker = defaultdict(list) # Lưu trữ kết quả (True/False cho thắng/thua) của mỗi dự đoán theo nguồn AI
 
-# Biến toàn cục cho telebot
-bot = None # Sẽ được khởi tạo sau
-# chat_id = None # Không còn dùng chat_id toàn cục như trước
+bot = None # Biến toàn cục cho telebot, sẽ được khởi tạo sau
+active_chat_ids = set() # Tập hợp các chat_id đã gửi /start hoặc /du_doan
 
-# Biến toàn cục mới cho logic MD5
+# Biến toàn cục cho logic MD5
 md5_giai_doan_counter = 0 # Đếm số lần phân tích MD5 cho kết quả 'Gãy' liên tiếp
 md5_analysis_result = "Khác" # Kết quả phân tích MD5 hiện tại, mặc định là 'Khác'
 
@@ -80,7 +77,6 @@ def load_patterns_from_file(filepath):
                     if line.startswith("#") or "=>" not in line: continue
                     try:
                         parts = line.split("=>")
-                        # DÒNG NÀY ĐÃ ĐƯỢC SỬA: Bỏ `.0` thừa
                         pattern = parts[0].strip()
                         prediction = parts[1].split("Dự đoán:")[1].strip()[0]
                         if prediction in ["T", "X"]:
@@ -220,7 +216,6 @@ def ai_hoc_hoi(history_before_result, actual_result):
     """
     global md5_analysis_result
 
-    # Simulate MD5 analysis result
     current_md5_result = simulate_md5_analysis()
     print(f"Kết quả phân tích MD5 mô phỏng: {current_md5_result}") # For debugging/logging
 
@@ -258,7 +253,6 @@ def ai_hoc_hoi(history_before_result, actual_result):
     save_pattern_counter()
 
 # ==== HÀM GỬI TIN NHẮN TELEGRAM (sử dụng telebot) ====
-# Lưu ý: telebot sử dụng blocking calls theo mặc định, cần xử lý asynchronous nếu dùng chung với asyncio
 async def send_telegram_message(target_chat_id: int, message_text: str):
     """Gửi tin nhắn văn bản đến Telegram."""
     if bot:
@@ -344,9 +338,6 @@ async def hien_thi_telegram(target_chat_id: int, phien, xx, tong, kq_thucte, pre
 
 
 # ==== VÒNG LẶP CHÍNH CỦA BOT (ASYNCHRONOUS) ====
-# Biến để theo dõi các chat_id đã gửi /start
-active_chat_ids = set()
-
 async def main_bot_loop():
     """
     Vòng lặp chính của tool, thực hiện các bước:
@@ -356,7 +347,6 @@ async def main_bot_loop():
     """
     global last_processed_phien
 
-    # Chỉ bắt đầu xử lý nếu có ít nhất một chat_id hoạt động
     if not active_chat_ids:
         print("Chưa có Chat ID hoạt động, chờ người dùng /start để bắt đầu.")
         return
@@ -395,11 +385,9 @@ async def main_bot_loop():
 
         cap_nhat_lich_su(kq_thucte)
 
-        # Gửi tin nhắn Telegram đến tất cả các chat_id đã đăng ký
         for c_id in list(active_chat_ids): # Tạo bản sao để tránh lỗi khi sửa đổi tập hợp trong vòng lặp
             await hien_thi_telegram(c_id, phien_api, [xx1, xx2, xx3], tong, kq_thucte, all_predictions, final_choice, win_rate_tracker)
 
-        # In ra console để debug (tùy chọn)
         os.system('cls' if os.name == 'nt' else 'clear')
         print(f"Phiên {phien_api} đã được xử lý và gửi Telegram.")
         print(f"Lịch sử cầu hiện tại: {''.join(lich_su)}")
@@ -408,25 +396,22 @@ async def main_bot_loop():
         ai_hoc_hoi(history_before, kq_thucte)
         last_processed_phien = phien_api
 
-# ==== XỬ LÝ LỆNH TELEGRAM (sử dụng telebot decorators) ====
+# ==== XỬ LÝ LỆNH TELEGRAM (sử dụng telebot) ====
 
-@bot.message_handler(commands=['start'])
+# Không dùng decorator @bot.message_handler ở đây, mà sẽ đăng ký sau khi bot được khởi tạo
 def start_command(message):
-    global active_chat_ids
-    active_chat_ids.add(message.chat.id) # Thêm chat_id vào tập hợp
+    global active_chat_ids, bot # Đảm bảo truy cập bot
+    active_chat_ids.add(message.chat.id)
     bot.reply_to(message, "Chào mừng bạn đến với <b>TX Pro AI</b>! 🤖\n"
                             "Tôi sẽ dự đoán Tài Xỉu cho bạn. Vui lòng đợi tôi theo dõi các phiên mới nhất.",
                             parse_mode='HTML')
     print(f"Đã nhận lệnh /start từ Chat ID: {message.chat.id}. Active chat IDs: {active_chat_ids}")
-    # Không cần tạo task ở đây, vòng lặp chính sẽ chạy riêng
 
-@bot.message_handler(commands=['du_doan'])
 def du_doan_command(message):
-    global active_chat_ids
-    active_chat_ids.add(message.chat.id) # Thêm chat_id vào tập hợp nếu chưa có
+    global active_chat_ids, bot # Đảm bảo truy cập bot
+    active_chat_ids.add(message.chat.id)
     bot.reply_to(message, "Đang lấy dữ liệu và phân tích dự đoán...")
     print(f"Đã nhận lệnh /du_doan từ Chat ID: {message.chat.id}")
-    # Chạy logic dự đoán một lần ngay lập tức
     asyncio.create_task(process_single_prediction_for_chat_id(message.chat.id))
 
 async def process_single_prediction_for_chat_id(target_chat_id: int):
@@ -446,7 +431,6 @@ async def process_single_prediction_for_chat_id(target_chat_id: int):
         await send_telegram_message(target_chat_id, "Dữ liệu phiên hoặc xúc xắc từ API không hợp lệ để dự đoán.")
         return
 
-    # Lấy lịch sử cầu hiện tại để dự đoán (không cần kiểm tra last_processed_phien)
     history_before = list(lich_su)
     history_str = "".join(history_before)
 
@@ -458,7 +442,7 @@ async def process_single_prediction_for_chat_id(target_chat_id: int):
     final_choice = chot_keo_cuoi_cung(all_predictions)
 
     tong = xx1 + xx2 + xx3
-    kq_thucte = tai_xiu(tong) # Đây là kết quả thực tế của phiên hiện tại trên API, không phải kết quả của phiên mà bạn đang dự đoán cho tương lai.
+    kq_thucte = tai_xiu(tong)
 
     # win_rate_tracker không được cập nhật trong lệnh /du_doan để tránh sai lệch thống kê
     # vì đây không phải là phiên bot tự động theo dõi
@@ -477,11 +461,10 @@ async def main_bot():
         print(f"{YELLOW}Vui lòng đặt biến môi trường TELEGRAM_BOT_TOKEN.{RESET}")
         return
 
+    # Khởi tạo đối tượng bot SAU KHI lấy được token
     bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
-    # Đăng ký các handler cho telebot (cần phải làm SAU khi đối tượng bot được tạo)
-    # Vì decorators @bot.message_handler chỉ hoạt động khi 'bot' đã tồn tại.
-    # Đây là một cách giải quyết để đăng ký handler sau khi bot được khởi tạo.
+    # Đăng ký các handler cho bot
     bot.register_message_handler(start_command, commands=['start'])
     bot.register_message_handler(du_doan_command, commands=['du_doan'])
 
@@ -499,9 +482,9 @@ async def main_bot():
     # Khởi chạy vòng lặp chính để kiểm tra phiên mới một cách định kỳ
     asyncio.create_task(run_main_loop_periodically())
 
-    # Chạy bot Telegram polling trong một thread riêng hoặc executor
-    # telebot.polling là blocking, cần chạy nó sao cho không block asyncio event loop
     print(f"{YELLOW}Bắt đầu polling Telegram...{RESET}")
+    # Chạy bot.polling trong một thread riêng để không block asyncio event loop
+    # Đây là cách chính để bot lắng nghe tin nhắn từ Telegram
     await asyncio.to_thread(bot.polling, none_stop=True, interval=0, timeout=20)
 
 
@@ -514,7 +497,9 @@ async def run_main_loop_periodically():
 
 if __name__ == "__main__":
     try:
+        # Xóa màn hình console khi khởi động (chỉ mang tính thẩm mỹ cho console cục bộ)
         os.system('cls' if os.name == 'nt' else 'clear')
+        # Khởi chạy hàm chính của bot (bất đồng bộ)
         asyncio.run(main_bot())
     except KeyboardInterrupt:
         print(f"\n{RED}{BOLD}[STOP] Đã dừng bot Telegram.{RESET}")
@@ -522,4 +507,3 @@ if __name__ == "__main__":
         print(f"\n{RED}{BOLD}[FATAL ERROR] Bot Telegram đã gặp lỗi: {e}{RESET}")
         import traceback
         traceback.print_exc()
-
