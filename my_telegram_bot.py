@@ -6,11 +6,11 @@ from datetime import datetime
 from collections import defaultdict, Counter
 import requests
 import telebot
-from flask import Flask, request, abort
+from flask import Flask, request, abort #
 
 # ==== CẤU HÌNH ====
 # API URL MỚI
-HTTP_API_URL = "http://157.10.52.15:3000/api/sunwin?key=Tuantutrum" # <-- Đã thay đổi API URL
+HTTP_API_URL = "http://157.10.52.15:3000/api/sunwin?key=Tuantutrum"
 # Tên các file dữ liệu
 LICHSU_FILE = "lichsucau.txt"
 DUDOAN_FILE = "dudoan.txt"          # File cầu VIP ưu tiên (AI 1)
@@ -38,12 +38,12 @@ cau_ai = {}
 win_rate_tracker = defaultdict(list)
 pending_predictions = {} # {phien_id: data}
 
-bot = None
+bot = None # Khởi tạo bot là None ban đầu
 active_chat_ids = set()
 
 # BIẾN CHO LOGIC MD5
 md5_giai_doan_counter = 0
-md5_analysis_result = "Khác"
+md5_analysis_result = "Khác" #
 
 # ==== CÁC HÀM TIỆN ÍCH & TẢI DỮ LIỆU ====
 
@@ -119,35 +119,20 @@ def get_data_from_api():
         json_data = response.json()
         
         # Phân tích dữ liệu từ API mới
-        # Ví dụ định dạng:
-        # {
-        #   "Cầu": "XTTTXXTT",
-        #   "Phiên Trước": "2686392",
-        #   "Kết Quả": "Tài",
-        #   "Xúc Xắc": "5 5 4",
-        #   "Phiên Hiện Tại": "2686393"
-        # }
-        
-        # Lấy thông tin phiên trước để xác định kết quả
-        phien_truoc = int(json_data.get("Phiên Trước"))
-        ket_qua_truoc = json_data.get("Kết Quả")
-        xuc_xac_truoc_str = json_data.get("Xúc Xắc")
+        phien_truoc = int(json_data.get("Phiên Trước")) #
+        ket_qua_truoc = json_data.get("Kết Quả") #
+        xuc_xac_truoc_str = json_data.get("Xúc Xắc") #
         
         # Xử lý chuỗi xúc xắc thành list int
-        xx_parts = [int(x) for x in xuc_xac_truoc_str.split(' ') if x.isdigit()]
+        xx_parts = [int(x) for x in xuc_xac_truoc_str.split(' ') if x.isdigit()] #
         
-        # Lấy lịch sử cầu và chỉ giữ 8 ký tự cuối
-        lich_su_cau_api = json_data.get("Cầu", "")
-        # lịch sử API này có thể chứa cả các phiên chưa chốt,
-        # chúng ta chỉ quan tâm đến lịch sử đã chốt để AI học
-        # và bot tự dự đoán trên đó.
-        # Ở đây, mình sẽ chỉ lấy 'T' hoặc 'X' từ 'Kết Quả' và thêm vào lịch sử của bot.
-        # Field "Cầu" có thể dùng để đồng bộ lịch sử ban đầu hoặc kiểm tra độ chính xác.
+        # Lấy lịch sử cầu từ API, có thể dùng để đồng bộ lịch sử ban đầu
+        lich_su_cau_api = json_data.get("Cầu", "") #
         
         return {
             "phien_truoc": phien_truoc,
             "ket_qua_truoc": "T" if ket_qua_truoc == "Tài" else "X", # Chuyển "Tài"/"Xỉu" sang "T"/"X"
-            "xuc_xac_truoc": xx_parts,
+            "xuc_xac_truoc": xx_parts, #
             "lich_su_cau_api": lich_su_cau_api # Giữ lại để debug hoặc kiểm tra
         }
     except (requests.exceptions.RequestException, json.JSONDecodeError, KeyError, ValueError) as e:
@@ -228,10 +213,10 @@ def chot_keo_cuoi_cung(predictions):
 
 def ai_hoc_hoi(history_before_result, actual_result):
     """AI học từ kết quả thực tế để cập nhật bộ đếm và tự học cầu mới."""
-    global md5_analysis_result, cau_dudoan, cau_ai
-    if md5_analysis_result == "Gãy":
-        print(f"{YELLOW}MD5 'Gãy', AI bỏ qua việc học phiên này.{RESET}")
-        return
+    global md5_analysis_result, cau_dudoan, cau_ai # Đảm bảo các biến này là global để sửa đổi chúng
+    if md5_analysis_result == "Gãy": #
+        print(f"{YELLOW}MD5 'Gãy', AI bỏ qua việc học phiên này.{RESET}") #
+        return #
 
     history_str = "".join(history_before_result)
     for length in range(MIN_PATTERN_LENGTH, min(len(history_str), MAX_PATTERN_LENGTH) + 1):
@@ -254,7 +239,7 @@ def ai_hoc_hoi(history_before_result, actual_result):
                     try:
                         with open(AI_FILE, "a", encoding="utf-8") as f:
                             f.write(f"\n{potential_pat} => Dự đoán: {prediction_to_learn} - Loại cầu: AI Tự Học")
-                        global cau_ai
+                        # Phải tải lại cau_ai để cập nhật pattern mới vào bộ nhớ
                         cau_ai = load_patterns_from_file(AI_FILE)
                         print(f"{GREEN}{BOLD}AI 2 đã học pattern mới: {potential_pat} => {prediction_to_learn}{RESET}")
                     except IOError as e:
@@ -290,7 +275,7 @@ def log_prediction_data(phien_du_doan, history_str, all_preds, final_choice, act
         with open(DULIEU_AI_FILE, "w", encoding="utf-8") as f:
             json.dump(logs, f, ensure_ascii=False, indent=2)
     except (IOError, json.JSONDecodeError) as e:
-        print(f"{RED}Lỗi khi ghi file nhật ký {DULIEu_AI_FILE}: {e}{RESET}")
+        print(f"{RED}Lỗi khi ghi file nhật ký {DULIEU_AI_FILE}: {e}{RESET}")
 
 
 # ==== LOGIC TELEGRAM ====
@@ -311,7 +296,7 @@ async def send_prediction_notification(phien_du_doan, predictions, final_choice)
         return f"<b><font color='green'>TÀI</font></b>" if kq == 'T' else f"<b><font color='red'>XỈU</font></b>"
 
     message = [f"<b>🔮 DỰ ĐOÁN CHO PHIÊN #{phien_du_doan} 🔮</b>"]
-    message.append(f"<b>Lịch sử cầu hiện tại của Bot:</b> <code>{''.join(lich_su)}</code>") # Đổi tên để rõ ràng
+    message.append(f"<b>Lịch sử cầu hiện tại của Bot:</b> <code>{''.join(lich_su)}</code>")
     message.append("─" * 25)
     message.append("<b>Tín hiệu từ các AI:</b>")
 
@@ -368,50 +353,43 @@ async def main_bot_loop():
     global last_processed_phien, lich_su, md5_giai_doan_counter, md5_analysis_result
 
     data = get_data_from_api()
-    if not data: return
+    if not data: return # Nếu không lấy được dữ liệu API thì thoát
 
-    phien_hien_tai_api = data.get("phien_truoc") # Sử dụng phien_truoc từ API làm phien_hien_tai_api
+    phien_hien_tai_api = data.get("phien_truoc") # Sử dụng phien_truoc từ API làm phien_hien_tai_api (phiên đã chốt)
     kq_thuc_te_api = data.get("ket_qua_truoc")
     xuc_xac_api = data.get("xuc_xac_truoc")
-    # lich_su_cau_api = data.get("lich_su_cau_api") # Có thể dùng để đồng bộ hoặc kiểm tra
+    lich_su_cau_api = data.get("lich_su_cau_api") # Lịch sử API cung cấp
 
     if phien_hien_tai_api is None or not xuc_xac_api:
         print(f"{YELLOW}Dữ liệu API chưa đầy đủ cho phiên hiện tại.{RESET}")
         return
 
-    # Đảm bảo chỉ xử lý khi có phiên mới thực sự
+    # --- Xử lý lần chạy đầu tiên hoặc khi bot vừa khởi động lại ---
     if last_processed_phien is None:
-        # Lần chạy đầu tiên, lấy lịch sử từ API để khởi tạo
-        # (Chỉ lấy 8 ký tự cuối cùng từ 'Cầu' của API để đồng bộ)
-        if data.get("lich_su_cau_api"):
-            lich_su = list(data["lich_su_cau_api"][-MAX_PATTERN_LENGTH:])
+        print(f"{GREEN}Lần chạy đầu tiên: Đang khởi tạo lịch sử bot và dự đoán phiên kế tiếp.{RESET}")
+        
+        # Nếu API cung cấp lịch sử cầu, sử dụng nó để khởi tạo lịch sử bot
+        if lich_su_cau_api: #
+            # Lấy 8 ký tự cuối cùng từ lịch sử API và cập nhật vào lịch_su của bot
+            lich_su = list(lich_su_cau_api[-MAX_PATTERN_LENGTH:]) #
             cap_nhat_lich_su_file()
             print(f"{GREEN}Khởi tạo lịch sử bot từ API: {''.join(lich_su)}{RESET}")
         else:
             print(f"{YELLOW}Không có lịch sử cầu từ API để khởi tạo. Bắt đầu với lịch sử trống.{RESET}")
             lich_su = [] # Đảm bảo lich_su không rỗng nếu API không cung cấp
 
-        # Giờ xử lý phiên hiện tại mà API vừa trả về kết quả
-        tong_hien_tai = sum(xuc_xac_api)
-        kq_thucte_phien_hien_tai = tai_xiu(tong_hien_tai)
-
-        if not lich_su or lich_su[-1] != kq_thucte_phien_hien_tai:
-            # Nếu lịch sử chưa có hoặc kết quả cuối cùng không khớp, thêm vào
-            print(f"{YELLOW}Đang đồng bộ lịch sử bot với kết quả phiên {phien_hien_tai_api} từ API ({kq_thucte_phien_hien_tai}).{RESET}")
-            lich_su.append(kq_thucte_phien_hien_tai)
-            lich_su = lich_su[-MAX_PATTERN_LENGTH:] # Giới hạn độ dài
-            cap_nhat_lich_su_file()
-
-        # Cập nhật trạng thái MD5 cho phiên tiếp theo
-        simulate_md5_analysis()
+        # Cập nhật last_processed_phien với phiên mà API vừa trả về kết quả
         last_processed_phien = phien_hien_tai_api
+        
+        # Cập nhật trạng thái MD5 cho phiên tiếp theo (sau khi đã xử lý phiên hiện tại của API)
+        simulate_md5_analysis()
 
-        # Log phiên đầu tiên và chuẩn bị dự đoán cho phiên sau đó
+        # Dự đoán cho phiên TIẾP THEO (phien_hien_tai_api + 1)
+        phien_tiep_theo = phien_hien_tai_api + 1
         current_history_str_for_prediction = "".join(lich_su)
         all_predictions = get_all_predictions(current_history_str_for_prediction)
         final_choice = chot_keo_cuoi_cung(all_predictions)
 
-        phien_tiep_theo = phien_hien_tai_api + 1 # Phiên mà bot sẽ dự đoán
         await send_prediction_notification(phien_tiep_theo, all_predictions, final_choice)
         pending_predictions[phien_tiep_theo] = {
             "history_str": current_history_str_for_prediction,
@@ -419,56 +397,59 @@ async def main_bot_loop():
             "final_choice": final_choice
         }
         log_prediction_data(phien_tiep_theo, current_history_str_for_prediction, all_predictions, final_choice)
-        print(f"{BOLD}Đã khởi tạo và dự đoán phiên #{phien_tiep_theo}.{RESET}")
+        
+        print(f"{BOLD}Đã khởi tạo bot. Dự đoán phiên #{phien_tiep_theo}.{RESET}")
         print(f"Lịch sử cầu bot: {''.join(lich_su)}")
         os.system('cls' if os.name == 'nt' else 'clear')
         return # Thoát để chờ phiên tiếp theo
 
 
+    # --- Xử lý các lần chạy sau (phiên mới) ---
     if phien_hien_tai_api > last_processed_phien:
-        # Xử lý kết quả của phiên mà API vừa trả về (là phiên trước của API)
-        # Phiên này chính là phiên mà bot đã dự đoán TRƯỚC ĐÓ (last_processed_phien + 1)
-        # Hoặc là phiên mà bot CHƯA HỀ DỰ ĐOÁN nếu đây là phiên nhảy cóc
+        # Phiên mà API vừa trả về kết quả (phien_hien_tai_api)
+        # Chính là phiên mà bot đã dự đoán TRƯỚC ĐÓ nếu là phiên liên tiếp
         
         phien_expected_result = last_processed_phien + 1
         
+        # Kiểm tra xem có phiên nào bị bỏ lỡ không (ví dụ: bot bị dừng lâu, hoặc API nhảy cóc)
         if phien_hien_tai_api != phien_expected_result:
             print(f"{YELLOW}Cảnh báo: Phát hiện phiên nhảy cóc từ {last_processed_phien} lên {phien_hien_tai_api}.{RESET}")
-            # Xử lý các phiên bị bỏ lỡ nếu cần, ở đây ta chỉ cập nhật lịch sử
-            # và bỏ qua việc học/thông báo chi tiết cho các phiên nhảy cóc.
-            # Lấy kết quả thực tế từ API để cập nhật lịch sử
-            tong_hien_tai = sum(xuc_xac_api)
-            kq_thucte_phien_hien_tai = tai_xiu(tong_hien_tai)
-            lich_su.append(kq_thucte_phien_hien_tai)
-            lich_su = lich_su[-MAX_PATTERN_LENGTH:]
+            # Xử lý các phiên bị bỏ lỡ nếu cần. Hiện tại, ta chỉ cập nhật lịch sử
+            # và không gửi thông báo hay học hỏi chi tiết cho các phiên này.
+            
+            # Cập nhật lịch sử bot với kết quả thực tế của phiên hiện tại từ API
+            lich_su.append(kq_thuc_te_api)
+            lich_su = lich_su[-MAX_PATTERN_LENGTH:] # Giới hạn độ dài
             cap_nhat_lich_su_file()
             
-            # Cập nhật last_processed_phien và MD5 cho phiên tiếp theo
-            simulate_md5_analysis()
+            # Xóa các dự đoán đang chờ xử lý cho các phiên bị bỏ lỡ
+            keys_to_remove = [p for p in pending_predictions.keys() if p < phien_hien_tai_api]
+            for key in keys_to_remove:
+                pending_predictions.pop(key, None)
+                print(f"{YELLOW}Đã xóa dự đoán chờ xử lý cho phiên {key} (phiên bị bỏ lỡ).{RESET}")
+
+            # Cập nhật last_processed_phien và trạng thái MD5
             last_processed_phien = phien_hien_tai_api
+            simulate_md5_analysis()
             print(f"{YELLOW}Đã cập nhật lịch sử bot đến phiên {phien_hien_tai_api} do nhảy cóc.{RESET}")
-            # Không có dự đoán trước đó, nên bỏ qua phần kết quả và học hỏi chi tiết cho phiên này
             
         else: # Phiên liên tiếp, xử lý như bình thường
             if phien_expected_result in pending_predictions:
                 prediction_data = pending_predictions.pop(phien_expected_result)
                 
-                # Cập nhật kết quả thực tế cho phiên này
-                tong_hien_tai = sum(xuc_xac_api)
-                kq_thucte_phien_hien_tai = tai_xiu(tong_hien_tai)
-
                 # Gửi thông báo kết quả
-                await send_result_notification(phien_expected_result, xuc_xac_api, tong_hien_tai, kq_thucte_phien_hien_tai, prediction_data)
+                tong_hien_tai = sum(xuc_xac_api)
+                await send_result_notification(phien_expected_result, xuc_xac_api, tong_hien_tai, kq_thuc_te_api, prediction_data)
                 
                 # Cập nhật lịch sử và cho AI học hỏi
-                lich_su.append(kq_thucte_phien_hien_tai)
+                lich_su.append(kq_thuc_te_api)
                 lich_su = lich_su[-MAX_PATTERN_LENGTH:]
                 cap_nhat_lich_su_file()
                 
-                is_win = (prediction_data['final_choice']['ket_qua'] == kq_thucte_phien_hien_tai) if prediction_data['final_choice']['ket_qua'] != "Bỏ qua" else None
-                log_prediction_data(phien_expected_result, prediction_data['history_str'], prediction_data['all_predictions'], prediction_data['final_choice'], kq_thucte_phien_hien_tai, is_win)
+                is_win = (prediction_data['final_choice']['ket_qua'] == kq_thuc_te_api) if prediction_data['final_choice']['ket_qua'] != "Bỏ qua" else None
+                log_prediction_data(phien_expected_result, prediction_data['history_str'], prediction_data['all_predictions'], prediction_data['final_choice'], kq_thuc_te_api, is_win)
 
-                ai_hoc_hoi(list(prediction_data['history_str']), kq_thucte_phien_hien_tai) # history_str.split() nếu là chuỗi đã có khoảng trắng
+                ai_hoc_hoi(list(prediction_data['history_str']), kq_thuc_te_api) # history_str.split() nếu là chuỗi đã có khoảng trắng
 
                 # Cập nhật trạng thái MD5 cho phiên tiếp theo
                 simulate_md5_analysis()
@@ -480,9 +461,7 @@ async def main_bot_loop():
                 # Trường hợp bot vừa khởi động và bỏ lỡ phiên dự đoán trước đó
                 # hoặc có lỗi trong pending_predictions. Chỉ cập nhật lịch sử.
                 print(f"{YELLOW}Cảnh báo: Không tìm thấy dự đoán cho phiên {phien_expected_result} trong pending_predictions. Chỉ cập nhật lịch sử.{RESET}")
-                tong_hien_tai = sum(xuc_xac_api)
-                kq_thucte_phien_hien_tai = tai_xiu(tong_hien_tai)
-                lich_su.append(kq_thucte_phien_hien_tai)
+                lich_su.append(kq_thuc_te_api)
                 lich_su = lich_su[-MAX_PATTERN_LENGTH:]
                 cap_nhat_lich_su_file()
                 simulate_md5_analysis() # Cập nhật MD5
@@ -490,7 +469,7 @@ async def main_bot_loop():
 
 
         # === DỰ ĐOÁN CHO PHIÊN TIẾP THEO ===
-        # Phiên tiếp theo luôn là phiên_hien_tai_api + 1
+        # Phiên tiếp theo luôn là phien_hien_tai_api + 1
         phien_tiep_theo = phien_hien_tai_api + 1
         current_history_str_for_prediction = "".join(lich_su)
 
@@ -513,7 +492,7 @@ async def main_bot_loop():
 
 
 def simulate_md5_analysis():
-    """Mô phỏng kết quả MD5: 2 Gãy -> 1 Khác."""
+    """Mô phỏng kết quả MD5: Cứ 2 lần phân tích MD5 cho kết quả 'Gãy' thì sẽ có 1 lần cho kết quả khác."""
     global md5_giai_doan_counter, md5_analysis_result
     if md5_giai_doan_counter < 2:
         md5_analysis_result = "Gãy"
@@ -534,16 +513,18 @@ def stop_command_handler(message):
     print(f"{YELLOW}Đã nhận /stop từ {message.chat.id}{RESET}")
 
 # ==== FLASK SERVER ĐỂ GIỮ DỊCH VỤ LUÔN CHẠY TRÊN RENDER (NẾU DÙNG WEB SERVICE) ====
-app = Flask(__name__)
+app = Flask(__name__) #
 
-@app.route('/')
-def hello_world():
-    return 'Bot is running and Flask server is active!'
+@app.route('/') #
+def hello_world(): #
+    return 'Bot is running and Flask server is active!' #
 
 def run_flask_app():
-    port = int(os.environ.get("PORT", 10000))
-    print(f"{YELLOW}Bắt đầu Flask server trên cổng {port} để giữ dịch vụ luôn chạy...{RESET}")
-    app.run(host='0.0.0.0', port=port, debug=False)
+    # Render cung cấp cổng thông qua biến môi trường PORT
+    port = int(os.environ.get("PORT", 10000)) #
+    print(f"{YELLOW}Bắt đầu Flask server trên cổng {port} để giữ dịch vụ luôn chạy...{RESET}") #
+    # host='0.0.0.0' để lắng nghe trên tất cả các interface, debug=False cho production
+    app.run(host='0.0.0.0', port=port, debug=False) #
 
 
 async def run_main_loop_periodically():
@@ -560,13 +541,15 @@ async def run_main_loop_periodically():
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
 async def main():
-    global bot
+    global bot # Đảm bảo bot là biến global để có thể được gán giá trị
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     if not TELEGRAM_BOT_TOKEN:
         print(f"{RED}{BOLD}LỖI: Biến môi trường TELEGRAM_BOT_TOKEN chưa được đặt.{RESET}")
-        return
+        return # Thoát hàm main nếu không có token
 
-    bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+    bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN) # Khởi tạo bot ở đây
+
+    # Đăng ký các hàm xử lý lệnh Telegram
     bot.register_message_handler(start_command_handler, commands=['start'])
     bot.register_message_handler(stop_command_handler, commands=['stop'])
 
@@ -577,14 +560,16 @@ async def main():
     # Khởi chạy Flask server trong một thread riêng
     import threading
     flask_thread = threading.Thread(target=run_flask_app)
-    flask_thread.daemon = True
-    flask_thread.start()
+    flask_thread.daemon = True # Đảm bảo thread sẽ thoát khi chương trình chính thoát
+    flask_thread.start() #
     
     # Bắt đầu vòng lặp chính để kiểm tra API và xử lý phiên
     asyncio.create_task(run_main_loop_periodically())
     
     print(f"{YELLOW}Bắt đầu polling Telegram...{RESET}")
     # Chạy polling trong một thread khác để không chặn event loop chính
+    # none_stop=True: không dừng lại khi có lỗi
+    # interval=0, timeout=20: Cài đặt polling tối ưu hơn
     await asyncio.to_thread(bot.polling, none_stop=True, interval=0, timeout=20)
 
 if __name__ == "__main__":
