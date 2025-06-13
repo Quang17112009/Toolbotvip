@@ -5,7 +5,8 @@ from datetime import datetime
 from collections import defaultdict, Counter
 import requests
 import asyncio
-import telebot # Thư viện pyTelegramBotAPI
+import telebot
+from flask import Flask, request, abort # Import Flask
 
 # ==== CẤU HÌNH ====
 HTTP_API_URL = "https://apisunwin.up.railway.app/api/taixiu"
@@ -23,28 +24,25 @@ AI_LEARN_THRESHOLD_RATE = 75 # Tỷ lệ chính xác tối thiểu (%) để AI 
 RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, RESET, BOLD = "\033[91m", "\033[92m", "\033[93m", "\033[94m", "\033[95m", "\033[96m", "\033[0m", "\033[1m"
 
 # ==== BIẾN TOÀN CỤC ====
-lich_su = [] # Lưu trữ lịch sử cầu (T/X) các phiên gần nhất
-pattern_counter = defaultdict(lambda: {"T": 0, "X": 0}) # Đếm số lần mỗi pattern kết thúc bằng T/X
-last_processed_phien = None # Lưu phiên cuối cùng đã xử lý
-cau_dudoan = {} # Lưu các pattern từ DUDOAN_FILE (AI 1)
-cau_ai = {}     # Lưu các pattern từ AI_FILE (AI 2)
-win_rate_tracker = defaultdict(list) # Lưu trữ kết quả (True/False cho thắng/thua) của mỗi dự đoán theo nguồn AI
+lich_su = []
+pattern_counter = defaultdict(lambda: {"T": 0, "X": 0})
+last_processed_phien = None
+cau_dudoan = {}
+cau_ai = {}
+win_rate_tracker = defaultdict(list)
 
-bot = None # Biến toàn cục cho telebot, sẽ được khởi tạo sau
-active_chat_ids = set() # Tập hợp các chat_id đã gửi /start hoặc /du_doan
+bot = None
+active_chat_ids = set()
 
-# Biến toàn cục cho logic MD5
-md5_giai_doan_counter = 0 # Đếm số lần phân tích MD5 cho kết quả 'Gãy' liên tiếp
-md5_analysis_result = "Khác" # Kết quả phân tích MD5 hiện tại, mặc định là 'Khác'
+md5_giai_doan_counter = 0
+md5_analysis_result = "Khác"
 
 # ==== CÁC HÀM TIỆN ÍCH CƠ BẢN ====
 
 def tai_xiu(tong):
-    """Xác định kết quả là Tài (T) hay Xỉu (X) dựa trên tổng điểm xúc xắc."""
     return "T" if tong >= 11 else "X"
 
 def load_lich_su():
-    """Tải lịch sử cầu từ file LICHSU_FILE."""
     global lich_su
     try:
         if os.path.exists(LICHSU_FILE):
@@ -56,7 +54,6 @@ def load_lich_su():
         lich_su = []
 
 def cap_nhat_lich_su(kq):
-    """Cập nhật lịch sử cầu mới nhất vào bộ nhớ và file."""
     global lich_su
     lich_su.append(kq)
     lich_su = lich_su[-MAX_PATTERN_LENGTH:]
@@ -67,7 +64,6 @@ def cap_nhat_lich_su(kq):
         print(f"Lỗi khi ghi lịch sử vào file: {e}")
 
 def load_patterns_from_file(filepath):
-    """Tải các pattern dự đoán từ một file cụ thể (dudoan.txt hoặc ai_1-2.txt)."""
     patterns = {}
     if os.path.exists(filepath):
         try:
@@ -88,13 +84,11 @@ def load_patterns_from_file(filepath):
     return patterns
 
 def load_all_patterns():
-    """Tải tất cả các pattern từ file dự đoán (VIP - AI 1) và file AI tự học (AI 2)."""
     global cau_dudoan, cau_ai
     cau_dudoan = load_patterns_from_file(DUDOAN_FILE)
     cau_ai = load_patterns_from_file(AI_FILE)
 
 def load_pattern_counter():
-    """Tải bộ đếm tần suất xuất hiện của các pattern từ file JSON."""
     global pattern_counter
     if os.path.exists(PATTERN_COUNT_FILE):
         try:
@@ -106,7 +100,6 @@ def load_pattern_counter():
             pattern_counter = defaultdict(lambda: {"T": 0, "X": 0})
 
 def save_pattern_counter():
-    """Lưu bộ đếm tần suất xuất hiện của các pattern vào file JSON."""
     try:
         with open(PATTERN_COUNT_FILE, "w", encoding="utf-8") as f:
             json.dump(pattern_counter, f, ensure_ascii=False, indent=2)
@@ -114,7 +107,6 @@ def save_pattern_counter():
         print(f"Lỗi khi ghi bộ đếm pattern: {e}")
 
 def get_data_from_api():
-    """Lấy dữ liệu phiên Tài Xỉu mới nhất từ API."""
     try:
         response = requests.get(HTTP_API_URL, timeout=10)
         response.raise_for_status()
@@ -129,10 +121,6 @@ def get_data_from_api():
 # ==== LOGIC DỰ ĐOÁN ĐA NGUỒN ====
 
 def get_prediction_from_source(history_str, source_patterns, source_name):
-    """
-    Lấy dự đoán từ một nguồn cụ thể (VIP - AI 1 hoặc AI Tự Học - AI 2).
-    Ưu tiên pattern dài nhất khớp được trong lịch sử cầu hiện tại.
-    """
     for length in range(min(len(history_str), MAX_PATTERN_LENGTH), MIN_PATTERN_LENGTH - 1, -1):
         pat = history_str[-length:]
         if pat in source_patterns:
@@ -144,10 +132,6 @@ def get_prediction_from_source(history_str, source_patterns, source_name):
     return None
 
 def get_statistical_prediction(history_str):
-    """
-    AI 3: Lấy dự đoán thuần túy từ xác suất thống kê trong pattern_counter.json.
-    Dựa trên pattern dài nhất có xác suất thắng cao nhất.
-    """
     for length in range(min(len(history_str), MAX_PATTERN_LENGTH), MIN_PATTERN_LENGTH - 1, -1):
         pat = history_str[-length:]
         if pat in pattern_counter:
@@ -163,10 +147,6 @@ def get_statistical_prediction(history_str):
     return None
 
 def chot_keo_cuoi_cung(predictions):
-    """
-    Logic "CHỐT KÈO": Tổng hợp các dự đoán từ các AI để đưa ra khuyến nghị cuối cùng.
-    Ưu tiên đồng thuận, sau đó là số đông, cuối cùng là AI có độ chính xác (accuracy) cao nhất.
-    """
     valid_preds = [p for p in predictions if p is not None]
     if not valid_preds:
         return {"ket_qua": "Bỏ qua", "ly_do": "Không có AI nào đưa ra tín hiệu."}
@@ -194,34 +174,26 @@ def chot_keo_cuoi_cung(predictions):
     }
 
 def simulate_md5_analysis():
-    """
-    Simulates the MD5 analysis result based on the rule:
-    For every 2 'Gãy' results, there will be 1 'Khác' result.
-    """
     global md5_giai_doan_counter, md5_analysis_result
 
     if md5_giai_doan_counter < 2:
         md5_giai_doan_counter += 1
         md5_analysis_result = "Gãy"
     else:
-        md5_giai_doan_counter = 0 # Reset counter after 2 'Gãy'
+        md5_giai_doan_counter = 0
         md5_analysis_result = "Khác"
     return md5_analysis_result
 
 
 def ai_hoc_hoi(history_before_result, actual_result):
-    """
-    AI học từ kết quả thực tế để cập nhật bộ đếm pattern và tự động thêm pattern mới vào AI_FILE (AI 2).
-    Hàm này được điều chỉnh để xem xét kết quả phân tích MD5 trước khi học.
-    """
     global md5_analysis_result
 
     current_md5_result = simulate_md5_analysis()
-    print(f"Kết quả phân tích MD5 mô phỏng: {current_md5_result}") # For debugging/logging
+    print(f"Kết quả phân tích MD5 mô phỏng: {current_md5_result}")
 
     if current_md5_result == "Gãy":
         print("MD5 phân tích 'Gãy', AI sẽ KHÔNG học từ phiên này để tránh sai lệch.")
-        return # AI does not learn if MD5 analysis is 'Gãy'
+        return
 
     history_str = "".join(history_before_result)
     for length in range(MIN_PATTERN_LENGTH, min(len(history_str), MAX_PATTERN_LENGTH) + 1):
@@ -254,21 +226,16 @@ def ai_hoc_hoi(history_before_result, actual_result):
 
 # ==== HÀM GỬI TIN NHẮN TELEGRAM (sử dụng telebot) ====
 async def send_telegram_message(target_chat_id: int, message_text: str):
-    """Gửi tin nhắn văn bản đến Telegram."""
     if bot:
         try:
-            # telebot.send_message là blocking, cần chạy trong executor để không block event loop
             await asyncio.to_thread(bot.send_message, chat_id=target_chat_id, text=message_text, parse_mode='HTML')
-            print(f"Đã gửi tin nhắn Telegram tới {target_chat_id}: {message_text.replace('<br>', ' ')}") # Ghi log console
+            print(f"Đã gửi tin nhắn Telegram tới {target_chat_id}: {message_text.replace('<br>', ' ')}")
         except Exception as e:
             print(f"Lỗi khi gửi tin nhắn Telegram tới {target_chat_id}: {e}")
     else:
         print("Bot chưa được khởi tạo để gửi tin nhắn Telegram.")
 
 async def hien_thi_telegram(target_chat_id: int, phien, xx, tong, kq_thucte, predictions, final_choice, win_tracker):
-    """
-    Tạo và gửi tin nhắn dự đoán Tài Xỉu tới Telegram.
-    """
     message_parts = []
     message_parts.append(f"<b>===== PHIÊN {phien} ({datetime.now().strftime('%H:%M:%S')}) =====</b>")
     message_parts.append(f"🎲 Xúc xắc      : <b>{xx[0]} - {xx[1]} - {xx[2]}</b>  =>  Tổng: <b>{tong}</b>")
@@ -327,7 +294,6 @@ async def hien_thi_telegram(target_chat_id: int, phien, xx, tong, kq_thucte, pre
         message_parts.append(f"  => <b>ĐỘ TIN CẬY: <span style='color:{conf_color};'>{confidence.upper()}</span></b>")
 
     message_parts.append("--------------------------------------------------------------------")
-    # Add MD5 analysis result to the Telegram message
     global md5_analysis_result
     md5_status_color = "red" if md5_analysis_result == "Gãy" else "green"
     message_parts.append(f"<b>Trạng thái MD5: <span style='color:{md5_status_color};'>{md5_analysis_result.upper()}</span></b>")
@@ -339,12 +305,6 @@ async def hien_thi_telegram(target_chat_id: int, phien, xx, tong, kq_thucte, pre
 
 # ==== VÒNG LẶP CHÍNH CỦA BOT (ASYNCHRONOUS) ====
 async def main_bot_loop():
-    """
-    Vòng lặp chính của tool, thực hiện các bước:
-    1. Lấy dữ liệu từ API.
-    2. Nếu có phiên mới, thực hiện dự đoán, cập nhật lịch sử và gửi tin nhắn Telegram đến TẤT CẢ các chat_id đã /start.
-    3. Chờ đợi phiên tiếp theo.
-    """
     global last_processed_phien
 
     if not active_chat_ids:
@@ -385,7 +345,7 @@ async def main_bot_loop():
 
         cap_nhat_lich_su(kq_thucte)
 
-        for c_id in list(active_chat_ids): # Tạo bản sao để tránh lỗi khi sửa đổi tập hợp trong vòng lặp
+        for c_id in list(active_chat_ids):
             await hien_thi_telegram(c_id, phien_api, [xx1, xx2, xx3], tong, kq_thucte, all_predictions, final_choice, win_rate_tracker)
 
         os.system('cls' if os.name == 'nt' else 'clear')
@@ -398,9 +358,8 @@ async def main_bot_loop():
 
 # ==== XỬ LÝ LỆNH TELEGRAM (sử dụng telebot) ====
 
-# Không dùng decorator @bot.message_handler ở đây, mà sẽ đăng ký sau khi bot được khởi tạo
 def start_command(message):
-    global active_chat_ids, bot # Đảm bảo truy cập bot
+    global active_chat_ids, bot
     active_chat_ids.add(message.chat.id)
     bot.reply_to(message, "Chào mừng bạn đến với <b>TX Pro AI</b>! 🤖\n"
                             "Tôi sẽ dự đoán Tài Xỉu cho bạn. Vui lòng đợi tôi theo dõi các phiên mới nhất.",
@@ -408,17 +367,13 @@ def start_command(message):
     print(f"Đã nhận lệnh /start từ Chat ID: {message.chat.id}. Active chat IDs: {active_chat_ids}")
 
 def du_doan_command(message):
-    global active_chat_ids, bot # Đảm bảo truy cập bot
+    global active_chat_ids, bot
     active_chat_ids.add(message.chat.id)
     bot.reply_to(message, "Đang lấy dữ liệu và phân tích dự đoán...")
     print(f"Đã nhận lệnh /du_doan từ Chat ID: {message.chat.id}")
     asyncio.create_task(process_single_prediction_for_chat_id(message.chat.id))
 
 async def process_single_prediction_for_chat_id(target_chat_id: int):
-    """
-    Xử lý một dự đoán đơn lẻ và gửi kết quả về chat_id cụ thể.
-    Được gọi khi có lệnh /du_doan.
-    """
     data = get_data_from_api()
     if not data or not isinstance(data, dict):
         await send_telegram_message(target_chat_id, "Không lấy được dữ liệu API hoặc dữ liệu không hợp lệ để dự đoán.")
@@ -444,15 +399,26 @@ async def process_single_prediction_for_chat_id(target_chat_id: int):
     tong = xx1 + xx2 + xx3
     kq_thucte = tai_xiu(tong)
 
-    # win_rate_tracker không được cập nhật trong lệnh /du_doan để tránh sai lệch thống kê
-    # vì đây không phải là phiên bot tự động theo dõi
-
     await hien_thi_telegram(target_chat_id, phien_api, [xx1, xx2, xx3], tong, kq_thucte, all_predictions, final_choice, win_rate_tracker)
 
+# ==== FLASK SERVER ĐỂ GIỮ DỊCH VỤ LUÔN CHẠY TRÊN RENDER (NẾU DÙNG WEB SERVICE) ====
+app = Flask(__name__)
+
+@app.route('/')
+def hello_world():
+    # Render sẽ gửi request HTTP đến '/' để kiểm tra dịch vụ có hoạt động không
+    # Chỉ cần trả về một chuỗi đơn giản để Render biết rằng ứng dụng đang "sống"
+    return 'Bot is running and Flask server is active!'
+
+def run_flask_app():
+    # Lấy port từ biến môi trường của Render (mặc định là 10000 nếu không tìm thấy)
+    port = int(os.environ.get("PORT", 10000))
+    print(f"{YELLOW}Bắt đầu Flask server trên cổng {port} để giữ dịch vụ luôn chạy...{RESET}")
+    # app.run là blocking, cần chạy trong một thread riêng hoặc asyncio.to_thread
+    app.run(host='0.0.0.0', port=port, debug=False)
 
 # ==== CHẠY BOT TELEGRAM ====
 async def main_bot():
-    """Hàm chính để khởi chạy bot Telegram và vòng lặp tự động."""
     global bot
 
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -461,14 +427,11 @@ async def main_bot():
         print(f"{YELLOW}Vui lòng đặt biến môi trường TELEGRAM_BOT_TOKEN.{RESET}")
         return
 
-    # Khởi tạo đối tượng bot SAU KHI lấy được token
     bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
-    # Đăng ký các handler cho bot
     bot.register_message_handler(start_command, commands=['start'])
     bot.register_message_handler(du_doan_command, commands=['du_doan'])
 
-    # Tải dữ liệu cần thiết khi khởi động tool
     load_pattern_counter()
     load_lich_su()
     load_all_patterns()
@@ -477,19 +440,22 @@ async def main_bot():
     print(f"       TOOL TX - Quangdz /Trung Ngu (Phiên bản Telegram - Telebot)               ")
     print(f"======================================================================{RESET}")
     print(f"{GREEN}Bot Telegram đã sẵn sàng. Đang chờ lệnh /start...{RESET}")
-    print(f"Kiểm tra token: {TELEGRAM_BOT_TOKEN[:5]}...{TELEGRAM_BOT_TOKEN[-5:]}") # Chỉ hiển thị một phần token
+    print(f"Kiểm tra token: {TELEGRAM_BOT_TOKEN[:5]}...{TELEGRAM_BOT_TOKEN[-5:]}")
+
+    # Khởi chạy Flask server trong một thread riêng để nó không block asyncio event loop
+    import threading
+    flask_thread = threading.Thread(target=run_flask_app)
+    flask_thread.daemon = True # Đặt thread là daemon để nó tự tắt khi chương trình chính kết thúc
+    flask_thread.start()
 
     # Khởi chạy vòng lặp chính để kiểm tra phiên mới một cách định kỳ
     asyncio.create_task(run_main_loop_periodically())
 
     print(f"{YELLOW}Bắt đầu polling Telegram...{RESET}")
-    # Chạy bot.polling trong một thread riêng để không block asyncio event loop
-    # Đây là cách chính để bot lắng nghe tin nhắn từ Telegram
     await asyncio.to_thread(bot.polling, none_stop=True, interval=0, timeout=20)
 
 
 async def run_main_loop_periodically():
-    """Chạy main_bot_loop định kỳ."""
     while True:
         await main_bot_loop()
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
@@ -497,9 +463,7 @@ async def run_main_loop_periodically():
 
 if __name__ == "__main__":
     try:
-        # Xóa màn hình console khi khởi động (chỉ mang tính thẩm mỹ cho console cục bộ)
         os.system('cls' if os.name == 'nt' else 'clear')
-        # Khởi chạy hàm chính của bot (bất đồng bộ)
         asyncio.run(main_bot())
     except KeyboardInterrupt:
         print(f"\n{RED}{BOLD}[STOP] Đã dừng bot Telegram.{RESET}")
