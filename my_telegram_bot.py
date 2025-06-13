@@ -453,8 +453,7 @@ async def main_bot():
     load_all_patterns()
 
     print(f"{BOLD}{GREEN}======================================================================")
-    print(f"       TOOL TX - Quangdz /Trung Ngu (Phiên bản Telegram)               ")
-    print(f"======================================================================{RESET}")
+    print(f"       TOOL TX - Quangdz /Trung       ")print(f"======================================================================{RESET}")
     print(f"{GREEN}Bot Telegram đã sẵn sàng. Đang chờ lệnh /start...{RESET}")
     print(f"Kiểm tra token: {TELEGRAM_BOT_TOKEN[:5]}...{TELEGRAM_BOT_TOKEN[-5:]}") # Chỉ hiển thị một phần token
 
