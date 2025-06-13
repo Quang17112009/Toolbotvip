@@ -6,6 +6,7 @@ from datetime import datetime
 from collections import defaultdict, Counter
 import requests
 import telebot # Thư viện pyTelegramBotAPI
+from flask import Flask, request, abort # <-- Đảm bảo dòng này có ở đây!
 
 # ==== CẤU HÌNH ====
 HTTP_API_URL = "https://apisunwin.up.railway.app/api/taixiu"
@@ -198,6 +199,7 @@ def chot_keo_cuoi_cung(predictions):
 
 def ai_hoc_hoi(history_before_result, actual_result):
     """AI học từ kết quả thực tế để cập nhật bộ đếm và tự học cầu mới."""
+    global md5_analysis_result, cau_dudoan, cau_ai # Đảm bảo các biến này được khai báo global
     if md5_analysis_result == "Gãy":
         print(f"{YELLOW}MD5 'Gãy', AI bỏ qua việc học phiên này.{RESET}")
         return
@@ -224,7 +226,7 @@ def ai_hoc_hoi(history_before_result, actual_result):
                         with open(AI_FILE, "a", encoding="utf-8") as f:
                             f.write(f"\n{potential_pat} => Dự đoán: {prediction_to_learn} - Loại cầu: AI Tự Học")
                         # Tải lại cầu AI sau khi học
-                        global cau_ai
+                        # global cau_ai # Đã khai báo ở đầu hàm rồi
                         cau_ai = load_patterns_from_file(AI_FILE)
                         print(f"{GREEN}{BOLD}AI 2 đã học pattern mới: {potential_pat} => {prediction_to_learn}{RESET}")
                     except IOError as e:
@@ -326,7 +328,7 @@ async def send_result_notification(phien, xx, tong, kq_thucte, prediction_data):
     if is_win is True:
         message.append(f"🎉 <b>THẮNG!</b> - Dự đoán <b>{format_kq(final_choice['ket_qua'])}</b> đã chính xác.")
     elif is_win is False:
-        message.append(f"😑 <b>THUA!</b> - Dự đoán <b>{format_kq(final_choice['ket_qua'])}</b>, kết quả là <b>{format_kq(kq_thucte)}</b>.")
+        message.append(f"😭 <b>THUA!</b> - Dự đoán <b>{format_kq(final_choice['ket_qua'])}</b>, kết quả là <b>{format_kq(kq_thucte)}</b>.")
     else: # Bỏ qua
         message.append(f"⚪️ <b>BỎ QUA</b> - Bot đã không đưa ra khuyến nghị cho phiên này.")
     
@@ -426,6 +428,23 @@ def stop_command_handler(message):
     bot.reply_to(message, "❌ <b>Bot đã tạm dừng.</b>\nGõ /start để nhận lại dự đoán.", parse_mode='HTML')
     print(f"{YELLOW}Đã nhận /stop từ {message.chat.id}{RESET}")
 
+# ==== FLASK SERVER ĐỂ GIỮ DỊCH VỤ LUÔN CHẠY TRÊN RENDER (NẾU DÙNG WEB SERVICE) ====
+app = Flask(__name__)
+
+@app.route('/')
+def hello_world():
+    # Render sẽ gửi request HTTP đến '/' để kiểm tra dịch vụ có hoạt động không
+    # Chỉ cần trả về một chuỗi đơn giản để Render biết rằng ứng dụng đang "sống"
+    return 'Bot is running and Flask server is active!'
+
+def run_flask_app():
+    # Lấy port từ biến môi trường của Render (mặc định là 10000 nếu không tìm thấy)
+    port = int(os.environ.get("PORT", 10000))
+    print(f"{YELLOW}Bắt đầu Flask server trên cổng {port} để giữ dịch vụ luôn chạy...{RESET}")
+    # app.run là blocking, cần chạy trong một thread riêng hoặc asyncio.to_thread
+    app.run(host='0.0.0.0', port=port, debug=False)
+
+
 async def run_main_loop_periodically():
     while True:
         try:
@@ -433,6 +452,8 @@ async def run_main_loop_periodically():
                 await main_bot_loop()
         except Exception as e:
             print(f"{RED}Lỗi trong vòng lặp chính: {e}{RESET}")
+            import traceback
+            traceback.print_exc() # In chi tiết lỗi để debug
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
 async def main():
@@ -450,7 +471,16 @@ async def main():
     print(f"{BOLD}{GREEN}=== TOOL TX PRO AI V3 (CHỦ ĐỘNG) ===")
     print(f"Bot đã sẵn sàng. Đang chờ lệnh /start...{RESET}")
 
+    # Khởi chạy Flask server trong một thread riêng để nó không block asyncio event loop
+    import threading
+    flask_thread = threading.Thread(target=run_flask_app)
+    flask_thread.daemon = True # Đặt thread là daemon để nó tự tắt khi chương trình chính kết thúc
+    flask_thread.start()
+    
     asyncio.create_task(run_main_loop_periodically())
+    
+    print(f"{YELLOW}Bắt đầu polling Telegram...{RESET}")
+    # Chạy polling trong một thread khác để không chặn event loop chính
     await asyncio.to_thread(bot.polling, none_stop=True, interval=0, timeout=20)
 
 if __name__ == "__main__":
@@ -463,5 +493,4 @@ if __name__ == "__main__":
         print(f"\n{RED}{BOLD}Lỗi nghiêm trọng: {e}{RESET}")
         import traceback
         traceback.print_exc()
-
 
