@@ -6,15 +6,26 @@ from collections import defaultdict, Counter
 import requests
 import asyncio
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application, CommandHandler, ContextTypes, MessageHandler, filters,
+    ExtBot
+)
+from flask import Flask, request, abort
+import logging
+
+# Thiết lập logging cơ bản
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # ==== CẤU HÌNH ====
 HTTP_API_URL = "https://apisunwin.up.railway.app/api/taixiu"
-LICHSU_FILE = "lichsucau.txt"
+# LICHSU_FILE, DUDOAN_FILE, AI_FILE, PATTERN_COUNT_FILE - Cảnh báo: Các file này không bền vững trên Render!
+# Để dữ liệu bền vững, bạn cần tích hợp Database.
+LICHSU_FILE = "lichsucau.txt" # Sẽ chỉ dùng trong bộ nhớ trong ví dụ này
 DUDOAN_FILE = "dudoan.txt" # File chứa các pattern dự đoán VIP (AI 1)
 AI_FILE = "ai_1-2.txt"    # File chứa các pattern AI tự học (AI 2)
-PATTERN_COUNT_FILE = "pattern_counter.json" # File lưu trữ tần suất của các pattern (cho AI 3 và AI 2 học)
-CHECK_INTERVAL_SECONDS = 5 # Thời gian chờ giữa các lần kiểm tra phiên mới
+PATTERN_COUNT_FILE = "pattern_counter.json" # Sẽ chỉ dùng trong bộ nhớ trong ví dụ này
+CHECK_INTERVAL_SECONDS = 5 # Thời gian chờ giữa các lần kiểm tra phiên mới (chỉ áp dụng nếu polling, không dùng với webhook)
 MIN_PATTERN_LENGTH = 4    # Độ dài tối thiểu của pattern để được xem xét
 MAX_PATTERN_LENGTH = 15   # Độ dài tối đa của pattern để được xem xét
 AI_LEARN_THRESHOLD_COUNT = 5 # Số lần xuất hiện tối thiểu của pattern để AI 2 xem xét học
@@ -31,13 +42,24 @@ cau_dudoan = {} # Lưu các pattern từ DUDOAN_FILE (AI 1)
 cau_ai = {}     # Lưu các pattern từ AI_FILE (AI 2)
 win_rate_tracker = defaultdict(list) # Lưu trữ kết quả (True/False cho thắng/thua) của mỗi dự đoán theo nguồn AI
 
-# Biến toàn cục để lưu trữ bot application
-application = None
-chat_id = None # Sẽ lưu trữ chat_id của người dùng đầu tiên tương tác với bot
+# Biến toàn cục để lưu trữ bot application và Flask app
+application: Application = None
+flask_app = Flask(__name__)
 
 # Biến toàn cục mới cho logic MD5
 md5_giai_doan_counter = 0 # Đếm số lần phân tích MD5 cho kết quả 'Gãy' liên tiếp
 md5_analysis_result = "Khác" # Kết quả phân tích MD5 hiện tại, mặc định là 'Khác'
+
+# Để lưu trữ chat_id của người dùng đã kích hoạt bot.
+# Cần cơ chế bền vững hơn nếu bot phải gửi tin tự động cho nhiều người dùng.
+# Trong ví dụ webhook, bot phản hồi trực tiếp các lệnh.
+# Để gửi tin nhắn chủ động, bạn cần lưu trữ chat_id vào DB.
+# Trong ví dụ này, chúng ta sẽ gửi tin nhắn phản hồi lệnh /du_doan
+# và không dùng vòng lặp tự động gửi tin nhắn mỗi CHECK_INTERVAL_SECONDS.
+# Nếu bạn muốn vòng lặp tự động, cần cơ chế Job Queue và lưu chat_id bền vững.
+# Hoặc, với webhook, cách thông thường là người dùng chủ động yêu cầu thông tin.
+tracked_chat_id = None
+
 
 # ==== CÁC HÀM TIỆN ÍCH CƠ BẢN ====
 
@@ -46,48 +68,44 @@ def tai_xiu(tong):
     return "T" if tong >= 11 else "X"
 
 def load_lich_su():
-    """Tải lịch sử cầu từ file LICHSU_FILE."""
+    """Tải lịch sử cầu từ file LICHSU_FILE. (Không bền vững trên Render nếu không dùng DB)"""
     global lich_su
-    try:
-        if os.path.exists(LICHSU_FILE):
-            with open(LICHSU_FILE, "r", encoding="utf-8") as f:
-                lich_su = [line.strip() for line in f if line.strip() in ['T', 'X']]
-            lich_su = lich_su[-MAX_PATTERN_LENGTH:]
-    except IOError as e:
-        print(f"Lỗi khi đọc file lịch sử: {e}")
-        lich_su = []
+    # Trên Render, file hệ thống không bền vững. Giữ trong bộ nhớ.
+    logger.info("Ignoring loading lichsucau.txt for persistent storage on Render.")
+    lich_su = [] # Bắt đầu trống để tránh lỗi nếu không có DB
 
 def cap_nhat_lich_su(kq):
-    """Cập nhật lịch sử cầu mới nhất vào bộ nhớ và file."""
+    """Cập nhật lịch sử cầu mới nhất vào bộ nhớ và file. (Không bền vững trên Render nếu không dùng DB)"""
     global lich_su
     lich_su.append(kq)
     lich_su = lich_su[-MAX_PATTERN_LENGTH:]
-    try:
-        with open(LICHSU_FILE, "w", encoding="utf-8") as f:
-            f.write("\n".join(lich_su))
-    except IOError as e:
-        print(f"Lỗi khi ghi lịch sử vào file: {e}")
+    logger.info(f"Updated lich_su in memory: {''.join(lich_su)}")
+    # logger.info("Ignoring saving lichsucau.txt for persistent storage on Render.")
 
 def load_patterns_from_file(filepath):
     """Tải các pattern dự đoán từ một file cụ thể (dudoan.txt hoặc ai_1-2.txt)."""
     patterns = {}
-    if os.path.exists(filepath):
+    # Sử dụng os.path.join để đảm bảo đường dẫn đúng trên mọi OS
+    absolute_filepath = os.path.join(os.path.dirname(__file__), filepath)
+    if os.path.exists(absolute_filepath):
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
+            with open(absolute_filepath, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if line.startswith("#") or "=>" not in line: continue
                     try:
                         parts = line.split("=>")
-                        # DÒNG NÀY ĐÃ ĐƯỢC SỬA: Bỏ `.0` thừa
                         pattern = parts[0].strip()
                         prediction = parts[1].split("Dự đoán:")[1].strip()[0]
                         if prediction in ["T", "X"]:
                             patterns[pattern] = prediction
-                    except (IndexError, KeyError):
+                    except (IndexError, KeyError) as e:
+                        logger.warning(f"Skipping malformed pattern line in {filepath}: {line} ({e})")
                         continue
         except IOError as e:
-            print(f"Lỗi khi đọc file cầu '{filepath}': {e}")
+            logger.error(f"Lỗi khi đọc file cầu '{filepath}': {e}")
+    else:
+        logger.warning(f"File pattern '{filepath}' không tồn tại tại {absolute_filepath}. Đảm bảo nó được include trong repo.")
     return patterns
 
 def load_all_patterns():
@@ -95,26 +113,21 @@ def load_all_patterns():
     global cau_dudoan, cau_ai
     cau_dudoan = load_patterns_from_file(DUDOAN_FILE)
     cau_ai = load_patterns_from_file(AI_FILE)
+    logger.info(f"Loaded {len(cau_dudoan)} patterns from {DUDOAN_FILE}")
+    logger.info(f"Loaded {len(cau_ai)} patterns from {AI_FILE}")
+
 
 def load_pattern_counter():
-    """Tải bộ đếm tần suất xuất hiện của các pattern từ file JSON."""
+    """Tải bộ đếm tần suất xuất hiện của các pattern từ file JSON. (Không bền vững trên Render nếu không dùng DB)"""
     global pattern_counter
-    if os.path.exists(PATTERN_COUNT_FILE):
-        try:
-            with open(PATTERN_COUNT_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                pattern_counter = defaultdict(lambda: {"T": 0, "X": 0}, data)
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"Cảnh báo: Không thể tải '{PATTERN_COUNT_FILE}'. Bắt đầu lại bộ đếm.")
-            pattern_counter = defaultdict(lambda: {"T": 0, "X": 0})
+    logger.info("Ignoring loading pattern_counter.json for persistent storage on Render.")
+    pattern_counter = defaultdict(lambda: {"T": 0, "X": 0}) # Bắt đầu lại bộ đếm
+
 
 def save_pattern_counter():
-    """Lưu bộ đếm tần suất xuất hiện của các pattern vào file JSON."""
-    try:
-        with open(PATTERN_COUNT_FILE, "w", encoding="utf-8") as f:
-            json.dump(pattern_counter, f, ensure_ascii=False, indent=2)
-    except IOError as e:
-        print(f"Lỗi khi ghi bộ đếm pattern: {e}")
+    """Lưu bộ đếm tần suất xuất hiện của các pattern vào file JSON. (Không bền vững trên Render nếu không dùng DB)"""
+    logger.info("Ignoring saving pattern_counter.json for persistent storage on Render.")
+
 
 def get_data_from_api():
     """Lấy dữ liệu phiên Tài Xỉu mới nhất từ API."""
@@ -123,10 +136,10 @@ def get_data_from_api():
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        print(f"Lỗi khi gọi API: {e}")
+        logger.error(f"Lỗi khi gọi API: {e}")
         return None
     except json.JSONDecodeError as e:
-        print(f"Lỗi giải mã JSON từ API: {e}")
+        logger.error(f"Lỗi giải mã JSON từ API: {e}")
         return None
 
 # ==== LOGIC DỰ ĐOÁN ĐA NGUỒN ====
@@ -184,31 +197,42 @@ def chot_keo_cuoi_cung(predictions):
             "confidence": "Rất Cao"
         }
 
-    if votes['T'] > votes['X']:
-        return {"ket_qua": "T", "ly_do": f"Số đông nghiêng về Tài ({votes['T']}/{len(valid_preds)}).", "confidence": "Cao"}
-    if votes['X'] > votes['T']:
-        return {"ket_qua": "X", "ly_do": f"Số đông nghiêng về Xỉu ({votes['X']}/{len(valid_preds)}).", "confidence": "Cao"}
+    # Sắp xếp để ưu tiên 'T' nếu số phiếu bằng nhau
+    sorted_votes = sorted(votes.items(), key=lambda item: (item[1], item[0]), reverse=True)
+    if len(sorted_votes) > 1 and sorted_votes[0][1] == sorted_votes[1][1]:
+        # Trường hợp hòa phiếu, ưu tiên AI có độ chính xác cao nhất
+        best_pred = max(valid_preds, key=lambda p: p['accuracy'])
+        return {
+            "ket_qua": best_pred['prediction'],
+            "ly_do": f"Hòa phiếu, ưu tiên {best_pred['source']} với độ chính xác cao nhất ({best_pred['accuracy']:.1f}%).",
+            "confidence": "Trung Bình"
+        }
+    else:
+        # Trường hợp có số đông rõ ràng
+        final_prediction = sorted_votes[0][0]
+        return {
+            "ket_qua": final_prediction,
+            "ly_do": f"Số đông nghiêng về {final_prediction} ({sorted_votes[0][1]}/{len(valid_preds)}).",
+            "confidence": "Cao"
+        }
 
-    best_pred = max(valid_preds, key=lambda p: p['accuracy'])
-    return {
-        "ket_qua": best_pred['prediction'],
-        "ly_do": f"Xung đột, ưu tiên {best_pred['source']} với độ chính xác cao nhất ({best_pred['accuracy']:.1f}%).",
-        "confidence": "Trung Bình"
-    }
 
 def simulate_md5_analysis():
     """
     Simulates the MD5 analysis result based on the rule:
     For every 2 'Gãy' results, there will be 1 'Khác' result.
+    This rule is based on the saved information from 2025-06-03.
     """
     global md5_giai_doan_counter, md5_analysis_result
 
+    logger.info(f"MD5 counter before simulation: {md5_giai_doan_counter}")
     if md5_giai_doan_counter < 2:
         md5_giai_doan_counter += 1
         md5_analysis_result = "Gãy"
     else:
         md5_giai_doan_counter = 0 # Reset counter after 2 'Gãy'
         md5_analysis_result = "Khác"
+    logger.info(f"MD5 analysis result simulated: {md5_analysis_result} (Counter: {md5_giai_doan_counter})")
     return md5_analysis_result
 
 
@@ -216,15 +240,16 @@ def ai_hoc_hoi(history_before_result, actual_result):
     """
     AI học từ kết quả thực tế để cập nhật bộ đếm pattern và tự động thêm pattern mới vào AI_FILE (AI 2).
     Hàm này được điều chỉnh để xem xét kết quả phân tích MD5 trước khi học.
+    (Các file pattern và counter không bền vững trên Render nếu không dùng DB)
     """
     global md5_analysis_result
 
     # Simulate MD5 analysis result
     current_md5_result = simulate_md5_analysis()
-    print(f"Kết quả phân tích MD5 mô phỏng: {current_md5_result}") # For debugging/logging
+    logger.info(f"Kết quả phân tích MD5 mô phỏng: {current_md5_result}") # For debugging/logging
 
     if current_md5_result == "Gãy":
-        print("MD5 phân tích 'Gãy', AI sẽ KHÔNG học từ phiên này để tránh sai lệch.")
+        logger.warning("MD5 phân tích 'Gãy', AI sẽ KHÔNG học từ phiên này để tránh sai lệch.")
         return # AI does not learn if MD5 analysis is 'Gãy'
 
     history_str = "".join(history_before_result)
@@ -247,28 +272,31 @@ def ai_hoc_hoi(history_before_result, actual_result):
                     prediction_to_learn = 'X'
 
                 if prediction_to_learn:
+                    # Ghi vào file AI_FILE (không bền vững trên Render)
+                    absolute_ai_filepath = os.path.join(os.path.dirname(__file__), AI_FILE)
                     try:
-                        with open(AI_FILE, "a", encoding="utf-8") as f:
+                        with open(absolute_ai_filepath, "a", encoding="utf-8") as f:
                             f.write(f"\n{potential_pat} => Dự đoán: {prediction_to_learn} - Loại cầu: AI Tự Học")
-                        load_all_patterns()
-                        print(f"AI 2 đã học pattern mới: {potential_pat} => {prediction_to_learn}")
+                        load_all_patterns() # Tải lại pattern sau khi thêm
+                        logger.info(f"AI 2 đã học pattern mới: {potential_pat} => {prediction_to_learn} (Lưu ý: Không bền vững)")
                     except IOError as e:
-                        print(f"Lỗi khi ghi cầu mới của AI: {e}")
-    save_pattern_counter()
+                        logger.error(f"Lỗi khi ghi cầu mới của AI: {e}")
+    save_pattern_counter() # Ghi counter (không bền vững trên Render)
+
 
 # ==== HÀM GỬI TIN NHẮN TELEGRAM ====
-async def send_telegram_message(context: ContextTypes.DEFAULT_TYPE, message_text: str):
+async def send_telegram_message(context: ContextTypes.DEFAULT_TYPE, message_text: str, chat_id_to_send: int):
     """Gửi tin nhắn văn bản đến Telegram."""
-    if chat_id:
+    if chat_id_to_send:
         try:
-            await context.bot.send_message(chat_id=chat_id, text=message_text, parse_mode='HTML')
-            print(f"Đã gửi tin nhắn Telegram: {message_text.replace('<br>', ' ')}") # Ghi log console
+            await context.bot.send_message(chat_id=chat_id_to_send, text=message_text, parse_mode='HTML')
+            logger.info(f"Đã gửi tin nhắn Telegram tới {chat_id_to_send}")
         except Exception as e:
-            print(f"Lỗi khi gửi tin nhắn Telegram: {e}")
+            logger.error(f"Lỗi khi gửi tin nhắn Telegram tới {chat_id_to_send}: {e}")
     else:
-        print("Chưa có Chat ID để gửi tin nhắn Telegram.")
+        logger.warning("Chưa có Chat ID để gửi tin nhắn Telegram.")
 
-async def hien_thi_telegram(context: ContextTypes.DEFAULT_TYPE, phien, xx, tong, kq_thucte, predictions, final_choice, win_tracker):
+async def hien_thi_telegram(context: ContextTypes.DEFAULT_TYPE, chat_id_to_send: int, phien, xx, tong, kq_thucte, predictions, final_choice, win_tracker):
     """
     Tạo và gửi tin nhắn dự đoán Tài Xỉu tới Telegram.
     """
@@ -337,35 +365,30 @@ async def hien_thi_telegram(context: ContextTypes.DEFAULT_TYPE, phien, xx, tong,
     message_parts.append("--------------------------------------------------------------------")
     message_parts.append("Powered by <b>TX Pro AI</b> 🤖")
 
-    await send_telegram_message(context, "\n".join(message_parts))
+    await send_telegram_message(context, "\n".join(message_parts), chat_id_to_send)
 
-# ==== VÒNG LẶP CHÍNH CỦA BOT (ASYNCHRONOUS) ====
-async def main_bot_loop(context: ContextTypes.DEFAULT_TYPE):
+# ==== LOGIC XỬ LÝ PHIÊN ====
+async def process_taixiu_prediction(context: ContextTypes.DEFAULT_TYPE, chat_id_to_send: int):
     """
-    Vòng lặp chính của tool, thực hiện các bước:
-    1. Lấy dữ liệu từ API.
-    2. Nếu có phiên mới, thực hiện dự đoán, cập nhật lịch sử và gửi tin nhắn Telegram.
-    3. Chờ đợi phiên tiếp theo.
+    Thực hiện logic lấy dữ liệu, dự đoán và gửi tin nhắn.
+    Được gọi khi người dùng yêu cầu hoặc trong một vòng lặp job (nếu muốn tự động).
     """
-    global last_processed_phien, chat_id
+    global last_processed_phien, win_rate_tracker
 
-    # Chỉ bắt đầu xử lý nếu có chat_id để gửi tin nhắn
-    if not chat_id:
-        print("Chưa có Chat ID, chờ người dùng /start để bắt đầu.")
-        return
-
+    logger.info("Bắt đầu xử lý dự đoán Tài Xỉu...")
     data = get_data_from_api()
     if not data or not isinstance(data, dict):
-        print("Không lấy được dữ liệu API hoặc dữ liệu không hợp lệ.")
+        await send_telegram_message(context, "❌ Lỗi: Không lấy được dữ liệu API hoặc dữ liệu không hợp lệ.", chat_id_to_send)
         return
 
     phien_api = data.get("Phien")
     xx1, xx2, xx3 = data.get("Xuc_xac_1"), data.get("Xuc_xac_2"), data.get("Xuc_xac_3")
 
     if phien_api is None or not all(isinstance(x, int) for x in [xx1, xx2, xx3]):
-        print("Dữ liệu phiên hoặc xúc xắc từ API không hợp lệ.")
+        await send_telegram_message(context, "❌ Lỗi: Dữ liệu phiên hoặc xúc xắc từ API không hợp lệ.", chat_id_to_send)
         return
 
+    # Chỉ xử lý nếu có phiên mới
     if last_processed_phien is None or phien_api > last_processed_phien:
         history_before = list(lich_su)
         history_str = "".join(history_before)
@@ -380,95 +403,169 @@ async def main_bot_loop(context: ContextTypes.DEFAULT_TYPE):
         tong = xx1 + xx2 + xx3
         kq_thucte = tai_xiu(tong)
 
+        # Cập nhật win_rate_tracker cho tất cả các dự đoán (nếu có)
         for pred_obj in all_predictions:
             if pred_obj:
                 source_key = pred_obj['source']
                 predicted_outcome = pred_obj['prediction']
                 win_rate_tracker[source_key].append(predicted_outcome == kq_thucte)
 
-        cap_nhat_lich_su(kq_thucte)
+        cap_nhat_lich_su(kq_thucte) # Cập nhật lịch sử trong bộ nhớ
 
-        # Gửi tin nhắn Telegram
-        await hien_thi_telegram(context, phien_api, [xx1, xx2, xx3], tong, kq_thucte, all_predictions, final_choice, win_rate_tracker)
+        await hien_thi_telegram(context, chat_id_to_send, phien_api, [xx1, xx2, xx3], tong, kq_thucte, all_predictions, final_choice, win_rate_tracker)
 
-        # In ra console để debug (tùy chọn)
-        os.system('cls' if os.name == 'nt' else 'clear')
-        print(f"Phiên {phien_api} đã được xử lý và gửi Telegram.")
-        print(f"Lịch sử cầu hiện tại: {''.join(lich_su)}")
-        print(f"Chat ID: {chat_id}")
-
-        ai_hoc_hoi(history_before, kq_thucte)
+        ai_hoc_hoi(history_before, kq_thucte) # AI học
         last_processed_phien = phien_api
+        logger.info(f"Phiên {phien_api} đã được xử lý thành công.")
+    else:
+        logger.info(f"Phiên {phien_api} đã được xử lý trước đó hoặc không có phiên mới.")
+        await send_telegram_message(context, "ℹ️ Hiện tại không có phiên mới để phân tích. Vui lòng thử lại sau.", chat_id_to_send)
+
 
 # ==== XỬ LÝ LỆNH TELEGRAM ====
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Gửi tin nhắn chào mừng khi người dùng gửi lệnh /start."""
-    global chat_id
-    chat_id = update.effective_chat.id # Lưu lại chat_id để gửi tin nhắn tự động
+    global tracked_chat_id
+    tracked_chat_id = update.effective_chat.id # Lưu lại chat_id
+    logger.info(f"Nhận lệnh /start từ Chat ID: {tracked_chat_id}")
     await update.message.reply_html(
         "Chào mừng bạn đến với <b>TX Pro AI</b>! 🤖\n"
-        "Tôi sẽ dự đoán Tài Xỉu cho bạn. Vui lòng đợi tôi theo dõi các phiên mới nhất."
+        "Gửi lệnh /du_doan để nhận dự đoán phiên Tài Xỉu mới nhất."
     )
-    print(f"Đã nhận lệnh /start từ Chat ID: {chat_id}")
-    # Bắt đầu vòng lặp chính ngay lập tức sau khi nhận lệnh /start
-    # Đảm bảo task này chỉ được tạo một lần
-    if 'main_bot_task' not in context.job_queue.jobs():
-        context.job_queue.run_repeating(
-            main_bot_loop,
-            interval=CHECK_INTERVAL_SECONDS,
-            first=1, # Chạy lần đầu tiên sau 1 giây
-            name='main_bot_task'
-        )
 
 async def du_doan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Gửi dự đoán ngay lập tức khi người dùng gửi lệnh /du_doan."""
-    global chat_id
-    chat_id = update.effective_chat.id # Cập nhật chat_id nếu cần
+    global tracked_chat_id
+    tracked_chat_id = update.effective_chat.id # Cập nhật chat_id nếu cần
+    logger.info(f"Nhận lệnh /du_doan từ Chat ID: {tracked_chat_id}")
     await update.message.reply_text("Đang lấy dữ liệu và phân tích dự đoán...")
+    await process_taixiu_prediction(context, tracked_chat_id)
 
-    # Chạy logic dự đoán một lần ngay lập tức
-    await main_bot_loop(context)
+async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Phản hồi các lệnh không xác định."""
+    await update.message.reply_text("Xin lỗi, tôi không hiểu lệnh đó. Vui lòng sử dụng /start hoặc /du_doan.")
 
-# ==== CHẠY BOT TELEGRAM ====
-async def main_bot():
-    """Hàm chính để khởi chạy bot Telegram."""
+# ==== CẤU HÌNH VÀ CHẠY BOT VỚI WEBHOOKS ====
+
+async def setup_bot():
+    """Hàm khởi tạo và cấu hình bot."""
     global application
 
-    # Lấy token từ biến môi trường
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     if not TELEGRAM_BOT_TOKEN:
-        print(f"{RED}LỖI: Biến môi trường TELEGRAM_BOT_TOKEN chưa được đặt. Bot sẽ không chạy.{RESET}")
-        print(f"{YELLOW}Vui lòng chạy lệnh: export TELEGRAM_BOT_TOKEN=\"8080593458:AAFfIN0hVbZBflDCFAb-pJ51cysDoWRcsZU\"{RESET}")
-        return
+        logger.error("LỖI: Biến môi trường TELEGRAM_BOT_TOKEN chưa được đặt. Bot sẽ không chạy.")
+        raise ValueError("TELEGRAM_BOT_TOKEN is not set.")
 
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # Khởi tạo application với webhook
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .build()
+    )
 
     # Thêm các trình xử lý lệnh
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("du_doan", du_doan_command))
+    application.add_handler(MessageHandler(filters.COMMAND, unknown_command)) # Xử lý các lệnh không xác định
 
-    # Tải dữ liệu cần thiết khi khởi động tool
-    load_pattern_counter()
-    load_lich_su()
-    load_all_patterns()
+    # Tải dữ liệu cần thiết khi khởi động tool (chỉ đọc từ file cố định)
+    load_pattern_counter() # Sẽ reset trong bộ nhớ
+    load_lich_su()         # Sẽ reset trong bộ nhớ
+    load_all_patterns()    # Đọc từ các file dudoan.txt, ai_1-2.txt
 
-    print(f"{BOLD}{GREEN}======================================================================")
-    print(f"       TOOL TX - Quangdz /Trung       ")print(f"======================================================================{RESET}")
-    print(f"{GREEN}Bot Telegram đã sẵn sàng. Đang chờ lệnh /start...{RESET}")
-    print(f"Kiểm tra token: {TELEGRAM_BOT_TOKEN[:5]}...{TELEGRAM_BOT_TOKEN[-5:]}") # Chỉ hiển thị một phần token
+    logger.info(f"{BOLD}{GREEN}======================================================================")
+    logger.info(f"       TOOL TX - Quangdz /Trung Ngu (Phiên bản Telegram Webhook)        ")
+    logger.info(f"======================================================================{RESET}")
+    logger.info(f"{GREEN}Bot Telegram đã sẵn sàng.{RESET}")
 
-    # Chạy bot cho đến khi có lệnh dừng
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Không cần application.run_polling() ở đây. Flask sẽ lắng nghe.
+    # application.run_webhook() sẽ được gọi bên trong route Flask.
 
-if __name__ == "__main__":
+
+# Flask endpoint để nhận updates từ Telegram
+@flask_app.route('/', methods=['POST'])
+async def webhook():
+    if request.method == "POST":
+        try:
+            # Lấy update từ request body
+            update = Update.de_json(request.get_json(force=True), application.bot)
+            # Xử lý update bất đồng bộ
+            await application.process_update(update)
+            return "ok"
+        except Exception as e:
+            logger.error(f"Error processing webhook update: {e}")
+            abort(500)
+    return "ok"
+
+@flask_app.route('/')
+def hello():
+    # Trang chủ đơn giản để kiểm tra xem server có chạy không
+    return "TX Pro AI Bot is running!"
+
+async def set_webhook_on_startup():
+    """Đặt webhook cho bot."""
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL") # URL của ứng dụng Render của bạn
+    if not WEBHOOK_URL:
+        logger.error("LỖI: Biến môi trường WEBHOOK_URL chưa được đặt. Webhook sẽ không được thiết lập.")
+        return
+
     try:
-        # Xóa màn hình console khi khởi động (chỉ mang tính thẩm mỹ)
-        os.system('cls' if os.name == 'nt' else 'clear')
-        # Khởi chạy hàm chính của bot (bất đồng bộ)
-        asyncio.run(main_bot())
-    except KeyboardInterrupt:
-        print(f"\n{RED}{BOLD}[STOP] Đã dừng bot Telegram.{RESET}")
+        await application.bot.set_webhook(url=WEBHOOK_URL)
+        logger.info(f"Webhook đã được thiết lập thành công tới: {WEBHOOK_URL}")
     except Exception as e:
-        print(f"\n{RED}{BOLD}[FATAL ERROR] Bot Telegram đã gặp lỗi: {e}{RESET}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Lỗi khi thiết lập webhook: {e}")
+
+
+# Hàm để chạy setup bot và server Flask
+async def main():
+    await setup_bot()
+    # Sau khi application được setup, set webhook.
+    # Đây là cách tốt để đảm bảo webhook được set khi bot khởi động
+    # nhưng không bị chạy lại liên tục.
+    # Với Render, bạn có thể chạy nó một lần thông qua một "start command"
+    # hoặc xử lý trong một hàm khởi tạo.
+    # Tuy nhiên, cách chuẩn là bot tự set webhook khi khởi động nếu cần.
+    # Để đảm bảo nó chỉ chạy một lần, bạn có thể đưa vào một điều kiện.
+    # Với gunicorn, bạn có thể dùng một pre-hook hoặc đơn giản là để nó chạy khi server khởi động.
+    await set_webhook_on_startup()
+
+
+# Hàm để chạy bot và server Flask.
+# Flask app được chạy bằng gunicorn, không phải trực tiếp từ asyncio.run()
+if __name__ == "__main__":
+    # Để chạy cục bộ mà không cần gunicorn
+    # asyncio.run(main()) # Chạy setup bot
+    # flask_app.run(port=5000) # Chạy Flask (sẽ block)
+
+    # Khi deploy trên Render với gunicorn, gunicorn sẽ gọi `main:app`
+    # Do đó, hàm `main` (setup bot) cần được gọi trước khi `app` của Flask được sử dụng.
+    # Vì `main` là async, chúng ta cần một vòng lặp sự kiện để chạy nó.
+    # Nhưng gunicorn không trực tiếp chạy async code.
+    # Cách tốt nhất là đảm bảo setup_bot được gọi khi Flask app khởi động.
+
+    # Khởi tạo application trong ngữ cảnh của Flask
+    # Điều này đảm bảo Flask có thể truy cập 'application' object.
+    # Cần một cách để chạy 'setup_bot' bất đồng bộ trước khi Flask app bắt đầu xử lý request.
+    # Sử dụng @flask_app.before_first_request hoặc một hook của gunicorn.
+
+    # Cho mục đích đơn giản, ta sẽ gọi setup_bot (blocking) ở đây,
+    # sau đó gunicorn sẽ chạy flask_app. Điều này không lý tưởng cho async.
+    # Cách tốt hơn là sử dụng một thư viện như `hypercorn` thay `gunicorn` nếu muốn async end-to-end.
+    # Hoặc, với Flask, các hàm handler có thể là async.
+
+    # Để đảm bảo `application` được khởi tạo trước khi Flask server bắt đầu:
+    try:
+        # Chạy setup_bot bằng một vòng lặp sự kiện riêng biệt
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(setup_bot())
+        loop.run_until_complete(set_webhook_on_startup())
+        # The loop will be closed by gunicorn if it manages it, or needs explicit closure.
+    except Exception as e:
+        logger.critical(f"Fatal error during bot setup: {e}")
+        exit(1)
+
+    # Flask app (được gunicorn gọi)
+    app = flask_app # Đặt tên biến là `app` để `gunicorn main:app` có thể tìm thấy.
+
+    logger.info("Flask app đã được cấu hình và sẵn sàng bởi Gunicorn.")
+
