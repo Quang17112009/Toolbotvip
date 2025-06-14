@@ -15,6 +15,16 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ==== CẤU HÌNH ====
+# KHUYẾN NGHỊ: ĐẶT TOKEN BOT TRƯỚC TẤT CẢ CÁC DECORATOR @bot.message_handler
+# Để thử nghiệm cục bộ, bạn có thể gán token cứng ở đây.
+# KHI TRIỂN KHAI LÊN SERVER NHƯ RENDER, HÃY BỎ COMMENT DÒNG os.getenv() BÊN DƯỚI
+# VÀ COMMENT DÒNG GÁN TRỰC TIẾP TOKEN.
+TELEGRAM_BOT_TOKEN_HARDCODED = "8080593458:AAFfIN0hVbZBflDCFAb-pJ51cysDoWRcsZU" # <--- THAY THẾ BẰNG TOKEN BOT CỦA BẠN
+
+# Khởi tạo bot ngay lập tức
+bot = telebot.TeleBot("8080593458:AAFfIN0hVbZBflDCFAb-pJ51cysDoWRcsZU", parse_mode='HTML')
+
+
 # API URL MỚI
 HTTP_API_URL = "http://157.10.52.15:3000/api/sunwin?key=Tuantutrum"
 # Tên các file dữ liệu
@@ -49,11 +59,6 @@ cau_dudoan = {}
 cau_ai = {}
 win_rate_tracker = defaultdict(list)
 pending_predictions = {} # {phien_id: data}
-
-# Initialize bot here.
-# KHUYẾN NGHỊ: COMMENT DÒNG NÀY VÀ SỬ DỤNG BIẾN MÔI TRƯỜNG `TELEGRAM_BOT_TOKEN`
-# bot = telebot.TeleBot("8080593458:AAFfIN0hVbZBflDCFAb-pJ51cysDoWRcsZU", parse_mode='HTML')
-bot = None # Sẽ được khởi tạo sau khi lấy token từ env
 
 # user_data: Bây giờ sẽ dùng key làm khóa chính
 user_data = {} # {key_string: {chat_id: int, expiry_time: timestamp, role: "user/ctv/admin", username: str, current_chat_id: int, max_devices: int, assigned_chat_ids: list, associated_chat_id: int}}
@@ -815,7 +820,7 @@ async def main_bot_loop():
         await send_prediction_notification(phien_tiep_theo, all_predictions, final_choice)
 
         pending_predictions[phien_tiep_theo] = {
-            "history_str": current_history_str_for_prediction,
+            "history_str": current_history_str_for_history_str,
             "all_predictions": all_predictions,
             "final_choice": final_choice
         }
@@ -1055,21 +1060,22 @@ async def run_main_loop_periodically():
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
 async def main():
-    global bot # Sử dụng biến global bot
+    # Không cần dòng global bot nữa vì bot đã được khởi tạo ở phạm vi global
+    # và không gán lại giá trị cho nó ở đây.
 
     # === CẤU HÌNH TOKEN BOT ===
-    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not TELEGRAM_BOT_TOKEN:
-        logger.critical("LỖI: Biến môi trường TELEGRAM_BOT_TOKEN chưa được đặt. Bot sẽ không chạy.")
-        # Fallback to hardcoded token for local testing/debug IF NO ENV VAR
-        # Bạn nên COMMENT DÒNG GÁN TRỰC TIẾP NÀY KHI TRIỂN KHAI THẬT
-        TELEGRAM_BOT_TOKEN = "8080593458:AAFfIN0hVbZBflDCFAb-pJ51cysDoWRcsZU"
-        logger.warning(f"Sử dụng token được gán cứng cho mục đích debug. Vui lòng đặt biến môi trường TELEGRAM_BOT_TOKEN.")
-        if not TELEGRAM_BOT_TOKEN: # If hardcoded token is also missing/commented
-             logger.critical("Không có token bot nào được cung cấp. Đang thoát.")
-             return
-
-    bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, parse_mode='HTML')
+    # KHUYẾN NGHỊ KHI TRIỂN KHAI LÊN RENDER:
+    # BỎ COMMENT DÒNG NÀY:
+    # TELEGRAM_BOT_TOKEN_ENV = os.getenv("TELEGRAM_BOT_TOKEN")
+    # if TELEGRAM_BOT_TOKEN_ENV:
+    #     global bot
+    #     bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN_ENV, parse_mode='HTML')
+    #     logger.info("Bot đã được khởi tạo bằng biến môi trường TELEGRAM_BOT_TOKEN.")
+    # else:
+    #     logger.warning("Không tìm thấy biến môi trường TELEGRAM_BOT_TOKEN. Sẽ sử dụng token cứng đã cấu hình.")
+    #     # Nếu bạn muốn bot ngừng chạy nếu không có biến môi trường, hãy uncomment dòng dưới:
+    #     # logger.critical("LỖI: Biến môi trường TELEGRAM_BOT_TOKEN chưa được đặt. Bot sẽ không chạy.")
+    #     # return
     # === KẾT THÚC CẤU HÌNH TOKEN BOT ===
 
     load_data() # Tải dữ liệu ban đầu (bao gồm user_data và khởi tạo key admin mặc định)
@@ -1105,4 +1111,3 @@ if __name__ == "__main__":
         logger.info("Đã dừng bot do người dùng ngắt (Ctrl+C).")
     except Exception as e:
         logger.critical(f"Lỗi nghiêm trọng khi khởi động bot: {e}", exc_info=True)
-
