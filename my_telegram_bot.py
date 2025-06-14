@@ -1,7 +1,7 @@
 import os
 import telebot
 from telebot import types
-import json # Vẫn cần để lưu user_data
+import json
 import asyncio
 import threading
 import time
@@ -26,18 +26,27 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # Tên các file dữ liệu (Sẽ được lưu tạm thời nếu không có Persistent Disk)
-USER_DATA_FILE = "user_data.json"
-DULIEU_AI_FILE = "dulieu_ai.json" # Có thể dùng cho các logic AI phức tạp hơn
-PATTERN_COUNT_FILE = "pattern_counter.json" # Dành cho AI tự học
+# **QUAN TRỌNG:** Đối với Render Free Tier, các file này sẽ bị mất khi bot khởi động lại.
+# Nếu bạn cần dữ liệu bền vững, hãy dùng database bên ngoài (PostgreSQL, SQLite với Persistent Disk nếu nâng cấp gói).
+# Để tránh lỗi Permission Denied, sử dụng /tmp/ để lưu tạm nếu không có cách nào khác.
+USER_DATA_FILE = "/tmp/user_data.json"
+DULIEU_AI_FILE = "/tmp/dulieu_ai.json"
+PATTERN_COUNT_FILE = "/tmp/pattern_counter.json"
 
 # Tên file chứa các mẫu dự đoán cứng (đã đổi thành .txt)
-DUDOAN_PATTERNS_FILE = "dudoan.txt" # Đã đổi
+DUDOAN_PATTERNS_FILE = "dudoan.txt" # File này nên được tải lên cùng với code của bạn, không tạo lúc runtime
 
 # Cấu hình Token Bot
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", '8080593458:AAFjVM7hVLrv9AzV6WUU5ttpXc1vMRrEtSk') # THAY BẰNG TOKEN THẬT CỦA BẠN
+# Sẽ lấy từ biến môi trường RENDER_EXTERNAL_HOSTNAME nếu có,
+# HOẶC lấy từ biến môi trường TELEGRAM_BOT_TOKEN
+# HOẶC sử dụng token bạn cung cấp làm giá trị mặc định cuối cùng nếu không tìm thấy gì.
+# **LƯU Ý QUAN TRỌNG:** Khi deploy lên Render, BẠN PHẢI THÊM biến môi trường TELEGRAM_BOT_TOKEN vào Render Dashboard.
+# Giá trị '8080593458:AAFjVM7hVLrv9AzV6WUU5ttpXc1vMRrEtSk' chỉ là giá trị MẶC ĐỊNH nếu không có biến môi trường.
+# Nên tránh để token trực tiếp trong code nếu repo là public.
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", '8080593458:AAFjVM7hVLrv9AzV6WUU5ttpXc1vMRrEtSk')
 
 if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == '8080593458:AAFjVM7hVLrv9AzV6WUU5ttpXc1vMRrEtSk':
-    logger.critical("LỖI: TELEGRAM_BOT_TOKEN chưa được cấu hình hoặc vẫn là token mẫu. Bot sẽ không thể khởi động.")
+    logger.critical("LỖI: TELEGRAM_BOT_TOKEN chưa được cấu hình hoặc vẫn là token mẫu. Bot sẽ không thể khởi động. Vui lòng đặt biến môi trường TELEGRAM_BOT_TOKEN trên Render hoặc trong môi trường cục bộ.")
     exit()
 
 # Khởi tạo Bot
@@ -49,14 +58,14 @@ dulieu_ai = {} # Dành cho logic AI phức tạp hơn
 pattern_counter = {} # Dành cho AI tự học
 
 # API Key và Endpoint của game
-GAME_API_KEY = "Tuantutrum" # Đặt key của bạn ở đây
+GAME_API_KEY = "Quangdz" # Đặt key của bạn ở đây
 GAME_API_ENDPOINT = f"http://157.10.52.15:3000/api/sunwin?key={GAME_API_KEY}"
 
 # Dữ liệu dự đoán từ file dudoan.txt (sẽ là list of dicts: {"cau": "...", "du_doan": "..."})
 dudoan_patterns = []
 
-# Đặt ADMIN_ID từ ảnh của bạn
-ADMIN_ID = 6915752059
+# Đặt ADMIN_ID từ ảnh của bạn (ID: 6247869689 đã được xác nhận từ hình ảnh bạn cung cấp)
+ADMIN_ID = 6247869689
 
 # Biến để theo dõi phiên cuối cùng đã xử lý
 last_processed_phien = None
@@ -67,6 +76,16 @@ last_processed_phien = None
 
 def load_json_data(file_path, default_value={}):
     """Tải dữ liệu từ file JSON. Sẽ trả về giá trị mặc định nếu file không tồn tại."""
+    # Đảm bảo thư mục tồn tại nếu file_path có thư mục con
+    dir_name = os.path.dirname(file_path)
+    if dir_name and not os.path.exists(dir_name):
+        try:
+            os.makedirs(dir_name)
+        except OSError as exc: # Guard against race condition
+            if exc.errno != errno.EEXIST:
+                logger.error(f"Không thể tạo thư mục {dir_name}: {exc}")
+                return default_value
+
     if not os.path.exists(file_path):
         logger.warning(f"File {file_path} không tồn tại. Trả về giá trị mặc định.")
         return default_value
@@ -82,6 +101,16 @@ def load_json_data(file_path, default_value={}):
 
 def save_json_data(data, file_path):
     """Lưu dữ liệu vào file JSON. Dữ liệu này sẽ mất khi bot khởi động lại nếu không có Persistent Disk."""
+    # Đảm bảo thư mục tồn tại nếu file_path có thư mục con
+    dir_name = os.path.dirname(file_path)
+    if dir_name and not os.path.exists(dir_name):
+        try:
+            os.makedirs(dir_name)
+        except OSError as exc: # Guard against race condition
+            if exc.errno != errno.EEXIST:
+                logger.error(f"Không thể tạo thư mục {dir_name}: {exc}")
+                return
+
     try:
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
@@ -332,10 +361,6 @@ async def create_prediction_message(game_data):
 # ==============================================================================
 # 5. HANDLERS LỆNH TELEGRAM & LỆNH ADMIN (Giữ nguyên)
 # ==============================================================================
-
-# Dán toàn bộ các hàm từ @bot.message_handler(commands=['start'])
-# đến @bot.message_handler(commands=['captime']) vào đây.
-# (Các hàm này không cần thay đổi gì)
 
 @bot.message_handler(commands=['start'])
 async def start_command_handler(message):
@@ -860,7 +885,7 @@ async def echo_all(message):
 # 7. CHẠY BOT VÀ SERVER FLASK (CHO RENDER) HOẶC POLLING (CHO LOCAL/ISH)
 # ==============================================================================
 
-app = Flask(__name__)
+app = Flask(__name__) # Đối tượng Flask app
 
 @app.route('/')
 def index():
@@ -933,7 +958,7 @@ async def main():
     user_data = load_json_data(USER_DATA_FILE, {})
 
     # Load dudoan_patterns từ file text khi khởi động bot
-    dudoan_patterns = load_text_patterns(DUDOAN_PATTERNS_FILE) # Đã đổi hàm
+    dudoan_patterns = load_text_patterns(DUDOAN_PATTERNS_FILE)
 
     # Thêm một key admin mặc định nếu user_data rỗng, để có thể đăng nhập lần đầu
     if not user_data:
