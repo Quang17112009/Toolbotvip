@@ -49,7 +49,7 @@ dulieu_ai = {} # Dành cho logic AI phức tạp hơn
 pattern_counter = {} # Dành cho AI tự học
 
 # API Key và Endpoint của game
-GAME_API_KEY = "Quangdz" # Đặt key của bạn ở đây
+GAME_API_KEY = "Tuantutrum" # Đặt key của bạn ở đây
 GAME_API_ENDPOINT = f"http://157.10.52.15:3000/api/sunwin?key={GAME_API_KEY}"
 
 # Dữ liệu dự đoán từ file dudoan.txt (sẽ là list of dicts: {"cau": "...", "du_doan": "..."})
