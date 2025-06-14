@@ -47,8 +47,8 @@ pending_predictions = {} # {phien_id: data}
 
 # Initialize bot here with the actual token.
 # THIS IS WHERE THE `ValueError` OCCURRED BEFORE.
-# Replace "7912572586:AAEcZZmzXVjVNM5YO8TbHx1REd1i4gqGqCM" with the real token from BotFather.
-bot = telebot.TeleBot("7912572586:AAEcZZmzXVjVNM5YO8TbHx1REd1i4gqGqCM", parse_mode='HTML')
+# Replace "8080593458:AAFjVM7hVLrv9AzV6WUU5ttpXc1vMRrEtSk" with the real token from BotFather.
+bot = telebot.TeleBot("8080593458:AAFjVM7hVLrv9AzV6WUU5ttpXc1vMRrEtSk", parse_mode='HTML')
 
 # user_data: Bây giờ sẽ dùng key làm khóa chính
 user_data = {} # {key_string: {chat_id: int, expiry_time: timestamp, role: "user/ctv/admin", username: str, current_chat_id: int, max_devices: int, assigned_chat_ids: list, associated_chat_id: int}}
