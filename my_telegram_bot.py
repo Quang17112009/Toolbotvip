@@ -45,11 +45,10 @@ cau_ai = {}
 win_rate_tracker = defaultdict(list)
 pending_predictions = {} # {phien_id: data}
 
-# Initialize bot here, BEFORE any @bot.message_handler decorators
-# Use a placeholder token for now. The actual token will be pulled from
-# os.getenv("TELEGRAM_BOT_TOKEN") and assigned in main(). This is crucial
-# for the decorators to find a valid 'bot' object during script parsing.
-bot = telebot.TeleBot("PLACEHOLDER_TOKEN_FOR_DECORATORS", parse_mode='HTML')
+# Initialize bot here with the actual token.
+# THIS IS WHERE THE `ValueError` OCCURRED BEFORE.
+# Replace "7912572586:AAEcZZmzXVjVNM5YO8TbHx1REd1i4gqGqCM" with the real token from BotFather.
+bot = telebot.TeleBot("7912572586:AAEcZZmzXVjVNM5YO8TbHx1REd1i4gqGqCM", parse_mode='HTML')
 
 # user_data: Bây giờ sẽ dùng key làm khóa chính
 user_data = {} # {key_string: {chat_id: int, expiry_time: timestamp, role: "user/ctv/admin", username: str, current_chat_id: int, max_devices: int, assigned_chat_ids: list, associated_chat_id: int}}
@@ -252,7 +251,7 @@ def chot_keo_cuoi_cung(predictions):
     # Nếu không có AI 1, chọn theo số đông
     if votes['T'] > votes['X']:
         return {"ket_qua": "T", "ly_do": f"Số đông nghiêng về Tài ({votes['T']}/{num_votes})", "confidence": "Trung Bình"}
-    if votes['X'] > votes['X']: # <-- Lỗi logic ở đây: phải là votes['X'] > votes['T']
+    if votes['X'] > votes['T']: # <-- Đã sửa lỗi logic ở đây
         return {"ket_qua": "X", "ly_do": f"Số đông nghiêng về Xỉu ({votes['X']}/{num_votes})", "confidence": "Trung Bình"}
 
     # Nếu xung đột, chọn AI có accuracy cao nhất
@@ -353,6 +352,7 @@ async def send_telegram_message(chat_id, message_text):
             for user_key, user_info in list(user_data.items()):
                 if user_info.get('current_chat_id') == chat_id:
                     user_info['current_chat_id'] = None # Đặt về None để người dùng phải kích hoạt lại
+                    # Remove chat_id from assigned_chat_ids as well
                     user_info['assigned_chat_ids'] = [cid for cid in user_info['assigned_chat_ids'] if cid != chat_id]
                     save_user_data()
                     print(f"{YELLOW}Đã cập nhật trạng thái cho key '{user_key}' (ID: {chat_id}).{RESET}")
@@ -1057,10 +1057,11 @@ async def main():
     # LƯU Ý QUAN TRỌNG:
     # 1. KHÔNG NÊN LÀM ĐIỀU NÀY TRONG MÔI TRƯỜNG SẢN PHẨM HOẶC KHI ĐẨY CODE LÊN GITHUB CÔNG KHAI!
     # 2. HÃY HOÀN TÁC (REVERT) LẠI SAU KHI ĐÃ DEBUG XONG VÀ BOT CHẠY ĐƯỢC.
-    # 3. THAY THẾ "YOUR_TELEGRAM_BOT_TOKEN_HERE" BẰNG TOKEN THỰC CỦA BẠN.
     # TOKEN của bạn là: 8080593458:AAFfIN0hVbZBflDCFAb-pJ51cysDoWRcsZU
-    bot.token = "7912572586:AAEcZZmzXVjVNM5YO8TbHx1REd1i4gqGqCM"
-    print(f"{YELLOW}CẢNH BÁO: Đang chạy với token được hardcode trong code. Vui lòng xóa sau khi debug xong để đảm bảo an toàn!{RESET}")
+    # Tôi đã di chuyển dòng gán token này lên trên, ngay khi khởi tạo bot.
+    # Dòng này bây giờ không cần thiết nữa.
+    # bot.token = "7912572586:AAEcZZmzXVjVNM5YO8TbHx1REd1i4gqGqCM"
+    print(f"{YELLOW}CẢNH BÁO: Token được gán trực tiếp tại dòng khởi tạo bot. Vui lòng cân nhắc sử dụng biến môi trường!{RESET}")
 
     # Các dòng lấy token từ biến môi trường sẽ bị bỏ qua (hoặc comment lại)
     # TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
