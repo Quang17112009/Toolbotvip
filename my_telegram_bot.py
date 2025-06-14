@@ -1,888 +1,495 @@
 import os
-import telebot
-from telebot import types
 import json
-import asyncio
-import threading
 import time
-from datetime import datetime, timedelta
-import logging
-import random
-from flask import Flask, request, abort
+import asyncio
+from datetime import datetime
+from collections import defaultdict, Counter
+import requests
+import telebot # Thư viện pyTelegramBotAPI
+from flask import Flask, request, abort # <-- Đảm bảo dòng này có ở đây!
 
-# ==============================================================================
-# 1. CẤU HÌNH BAN ĐẦU & LOGGING
-# ==============================================================================
+# ==== CẤU HÌNH ====
+HTTP_API_URL = "https://apisunwin.up.railway.app/api/taixiu"
+# Tên các file dữ liệu
+LICHSU_FILE = "lichsucau.txt"
+DUDOAN_FILE = "dudoan.txt"          # File cầu VIP ưu tiên (AI 1)
+AI_FILE = "ai_1-2.txt"              # File cầu AI tự học (AI 2)
+PATTERN_COUNT_FILE = "pattern_counter.json" # File đếm tần suất cho AI 3 và AI 2
+# Tệp nhật ký mới để ghi lại tất cả các dự đoán và kết quả cho việc học nâng cao
+DULIEU_AI_FILE = "dulieu_ai.json"
 
-# Cấu hình Logging
-LOG_FILE = "bot_logs.log"
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    handlers=[
-                        logging.FileHandler(LOG_FILE, encoding='utf-8'),
-                        logging.StreamHandler() # Để xuất log ra console/Render logs
-                    ])
-logger = logging.getLogger(__name__)
+# Cài đặt thời gian và pattern
+CHECK_INTERVAL_SECONDS = 5          # Thời gian chờ giữa các lần kiểm tra phiên mới
+MIN_PATTERN_LENGTH = 4              # Độ dài tối thiểu của pattern
+MAX_PATTERN_LENGTH = 15             # Độ dài tối đa của pattern
+# Ngưỡng học cho AI 2
+AI_LEARN_THRESHOLD_COUNT = 5
+AI_LEARN_THRESHOLD_RATE = 75
 
-# Tên các file dữ liệu (Sử dụng /data/ cho Render Persistent Disk)
-# RẤT QUAN TRỌNG: Đảm bảo bạn đã cấu hình Render Disk với Mount Path là /data/
-DATA_DIR = "/data/"
-LICHSU_FILE = os.path.join(DATA_DIR, "lichsucau.txt")
-DUDOAN_FILE = os.path.join(DATA_DIR, "dudoan.txt")
-AI_FILE = os.path.join(DATA_DIR, "ai_1-2.txt")
-PATTERN_COUNT_FILE = os.path.join(DATA_DIR, "pattern_counter.json")
-DULIEU_AI_FILE = os.path.join(DATA_DIR, "dulieu_ai.json")
-USER_DATA_FILE = os.path.join(DATA_DIR, "user_data.json")
+# --- MÀU SẮC CHO CONSOLE ---
+RED, GREEN, YELLOW, RESET, BOLD = "\033[91m", "\033[92m", "\033[93m", "\033[0m", "\033[1m"
 
-# Tạo thư mục DATA_DIR nếu chưa tồn tại
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
-    logger.info(f"Đã tạo thư mục dữ liệu: {DATA_DIR}")
+# ==== BIẾN TOÀN CỤC ====
+lich_su = []
+pattern_counter = defaultdict(lambda: {"T": 0, "X": 0})
+last_processed_phien = None
+cau_dudoan = {}
+cau_ai = {}
+win_rate_tracker = defaultdict(list)
+# Biến mới để lưu các dự đoán đang chờ kết quả {phien_id: data}
+pending_predictions = {}
 
-# Cấu hình Token Bot (Sẽ ưu tiên lấy từ biến môi trường)
-# KHÔNG NÊN LƯU TOKEN CỨNG TRONG MÃ KHI TRIỂN KHAI THỰC TẾ
-TELEGRAM_BOT_TOKEN_HARDCODED = "" # Để trống hoặc đặt token của bạn nếu bạn CHẮC CHẮN không dùng biến môi trường
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN_HARDCODED)
+bot = None
+active_chat_ids = set()
 
-if not TELEGRAM_BOT_TOKEN:
-    logger.critical("LỖI: TELEGRAM_BOT_TOKEN chưa được cấu hình. Bot sẽ không thể khởi động.")
-    exit() # Thoát nếu không có token
+# BIẾN CHO LOGIC MD5
+md5_giai_doan_counter = 0
+md5_analysis_result = "Khác"
 
-# Khởi tạo Bot
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, parse_mode='HTML')
+# ==== CÁC HÀM TIỆN ÍCH & TẢI DỮ LIỆU ====
 
-# Dữ liệu toàn cục (sẽ được tải từ file)
-user_data = {}  # Lưu thông tin key và user_id/chat_id
-dulieu_ai = {}  # Dữ liệu AI để phân tích
-pattern_counter = {} # Đếm số lần xuất hiện của các pattern
+def tai_xiu(tong):
+    return "T" if tong >= 11 else "X"
 
-# ==============================================================================
-# 2. HÀM TIỆN ÍCH CHO FILE DỮ LIỆU
-# ==============================================================================
-
-def load_json_data(file_path, default_value={}):
-    """Tải dữ liệu từ file JSON."""
-    if not os.path.exists(file_path):
-        return default_value
+def load_data():
+    """Tải tất cả dữ liệu cần thiết khi khởi động."""
+    global lich_su, pattern_counter, cau_dudoan, cau_ai
+    # Tải lịch sử
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except json.JSONDecodeError:
-        logger.error(f"Lỗi đọc JSON từ file: {file_path}. Trả về giá trị mặc định.")
-        return default_value
-    except Exception as e:
-        logger.error(f"Lỗi khi tải dữ liệu từ {file_path}: {e}")
-        return default_value
-
-def save_json_data(data, file_path):
-    """Lưu dữ liệu vào file JSON."""
-    try:
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"Lỗi khi lưu dữ liệu vào {file_path}: {e}")
-
-def load_text_data(file_path):
-    """Tải dữ liệu từ file text."""
-    if not os.path.exists(file_path):
-        return []
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return [line.strip() for line in f if line.strip()]
-    except Exception as e:
-        logger.error(f"Lỗi khi tải dữ liệu từ {file_path}: {e}")
-        return []
-
-def save_text_data(data_list, file_path):
-    """Lưu dữ liệu danh sách vào file text, mỗi phần tử một dòng."""
-    try:
-        with open(file_path, 'w', encoding='utf-8') as f:
-            for item in data_list:
-                f.write(f"{item}\n")
-    except Exception as e:
-        logger.error(f"Lỗi khi lưu dữ liệu vào {file_path}: {e}")
-
-def save_user_data():
-    """Lưu dữ liệu user_data vào file."""
-    save_json_data(user_data, USER_DATA_FILE)
-
-def get_user_info_by_chat_id(chat_id):
-    """Tìm thông tin key và user_info dựa trên chat_id."""
-    for key_name, info in user_data.items():
-        if info.get('current_chat_id') == chat_id or chat_id in info.get('assigned_chat_ids', []):
-            return key_name, info
-    return None, None
-
-def get_user_info_by_key(key_name):
-    """Tìm thông tin user_info dựa trên tên key."""
-    return user_data.get(key_name.lower(), None)
-
-# ==============================================================================
-# 3. CHỨC NĂNG CHÍNH CỦA BOT
-# ==============================================================================
-
-async def send_telegram_message(chat_id, message_text, disable_notification=False):
-    """Gửi tin nhắn đến một chat_id cụ thể."""
-    try:
-        # bot.send_message là blocking, cần chạy trong thread riêng
-        await asyncio.to_thread(bot.send_message,
-                                chat_id=chat_id,
-                                text=message_text,
-                                parse_mode='HTML',
-                                disable_notification=disable_notification)
-        logger.info(f"Đã gửi tin nhắn đến {chat_id} thành công.")
-    except telebot.apihelper.ApiTelegramException as e:
-        logger.warning(f"Lỗi Telegram API khi gửi tin nhắn tới {chat_id}: {e}")
-        if "bot was blocked by the user" in str(e) or "chat not found" in str(e):
-            logger.warning(f"Người dùng {chat_id} đã chặn bot hoặc chat không tồn tại. Đang hủy kích hoạt key nếu tìm thấy.")
-            key_name, user_info = get_user_info_by_chat_id(chat_id)
-            if user_info:
-                user_info['is_receiving_predictions'] = False
-                # Xóa chat_id khỏi danh sách nếu có
-                if chat_id in user_info.get('assigned_chat_ids', []):
-                    user_info['assigned_chat_ids'].remove(chat_id)
-                if user_info.get('current_chat_id') == chat_id:
-                    user_info['current_chat_id'] = None
-                save_user_data()
-                logger.info(f"Đã hủy kích hoạt key '{key_name}' cho chat_id {chat_id} do lỗi gửi tin nhắn.")
-        elif "Too Many Requests" in str(e):
-            logger.warning(f"Đạt giới hạn Rate Limit khi gửi tin nhắn tới {chat_id}. Thử lại sau.")
-            # Có thể thêm logic đợi và thử lại ở đây nếu cần
-    except Exception as e:
-        logger.error(f"Lỗi không xác định khi gửi tin nhắn tới {chat_id}: {e}", exc_info=True)
-
-async def check_and_send_predictions():
-    """Kiểm tra và gửi dự đoán cho các key đang hoạt động."""
-    global dulieu_ai # Đảm bảo cập nhật dulieu_ai toàn cục
-    # Tải lại dữ liệu AI mỗi lần kiểm tra để đảm bảo cập nhật mới nhất
-    dulieu_ai = load_json_data(DULIEU_AI_FILE, {})
-    if not dulieu_ai:
-        logger.warning("Không có dữ liệu AI để tạo dự đoán.")
-        # Nếu không có dữ liệu AI, có thể thông báo cho tất cả người dùng đang nhận dự đoán
-        # hoặc chỉ log lỗi.
-        # return
-
-    # Lấy thời gian hiện tại
-    now = datetime.now()
-    current_minute = now.minute
-
-    # Logic thời gian cụ thể của bạn (ví dụ: mỗi 5 phút)
-    if current_minute % 5 == 0 and current_minute != 0: # Hoặc logic thời gian khác của bạn
-        logger.info(f"Đang kiểm tra và gửi dự đoán vào phút {current_minute}.")
-        for key_name, info in user_data.items():
-            if info.get('is_admin'): # Admin luôn nhận dự đoán nếu đang bật
-                if info.get('is_receiving_predictions') and info.get('current_chat_id'):
-                    await send_prediction_to_user(key_name, info['current_chat_id'])
-            elif info.get('is_receiving_predictions') and info.get('current_chat_id'):
-                # Kiểm tra thời hạn của key nếu không phải admin
-                expiry_time_str = info.get('expiry_time')
-                if expiry_time_str:
-                    expiry_time = datetime.fromisoformat(expiry_time_str)
-                    if now < expiry_time:
-                        await send_prediction_to_user(key_name, info['current_chat_id'])
-                    else:
-                        info['is_receiving_predictions'] = False
-                        save_user_data()
-                        await send_telegram_message(info['current_chat_id'],
-                                                    "⚠️ **Thông báo:**\nKey của bạn đã hết hạn. Vui lòng liên hệ Admin để gia hạn.")
-                        logger.info(f"Key '{key_name}' của người dùng {info['current_chat_id']} đã hết hạn.")
-                else:
-                    # Key không có thời hạn (chỉ Admin mới không có thời hạn)
-                    # Hoặc là key cũ chưa có expiry_time, xử lý tùy theo logic của bạn.
-                    # Mặc định, nếu không phải admin và không có expiry_time, coi như hết hạn
-                    info['is_receiving_predictions'] = False
-                    save_user_data()
-                    await send_telegram_message(info['current_chat_id'],
-                                                "⚠️ **Thông báo:**\nKey của bạn không có thông tin thời hạn hoặc đã hết hạn. Vui lòng liên hệ Admin.")
-                    logger.warning(f"Key '{key_name}' của người dùng {info['current_chat_id']} không có thời hạn hoặc thông tin hết hạn bị thiếu.")
-
-
-async def send_prediction_to_user(key_name, chat_id):
-    """Tạo và gửi một tin nhắn dự đoán tới người dùng."""
-    prediction_message = await create_prediction_message(key_name)
-    if prediction_message:
-        await send_telegram_message(chat_id, prediction_message)
-        logger.info(f"Đã gửi dự đoán tới key '{key_name}' (chat_id: {chat_id}).")
-    else:
-        logger.warning(f"Không thể tạo tin nhắn dự đoán cho key '{key_name}'.")
-        await send_telegram_message(chat_id, "⚠️ Hiện tại không thể tạo dự đoán. Vui lòng thử lại sau.", disable_notification=True)
-
-
-async def create_prediction_message(key_name):
-    """Tạo nội dung tin nhắn dự đoán dựa trên logic AI của bạn."""
-    if not dulieu_ai:
-        return "⚠️ Hệ thống AI đang được cập nhật dữ liệu. Vui lòng thử lại sau."
-
-    # Lấy dữ liệu AI cho key_name cụ thể hoặc dữ liệu chung
-    ai_data_for_key = dulieu_ai.get(key_name, dulieu_ai.get('default', {}))
-
-    if not ai_data_for_key:
-        return f"⚠️ Không có dữ liệu AI được cấu hình cho key '{key_name}'."
-
-    # Lấy một dự đoán ngẫu nhiên từ danh sách các dự đoán khả dụng
-    predictions = ai_data_for_key.get('predictions', [])
-    if not predictions:
-        return f"⚠️ Không có dự đoán nào được cấu hình cho key '{key_name}' trong dữ liệu AI."
-
-    prediction_text = random.choice(predictions)
-
-    # Thêm thông tin thời gian hiện tại
-    now = datetime.now()
-    formatted_time = now.strftime("%H:%M:%S")
-
-    # Lấy thời gian mở cửa tiếp theo (ví dụ: nếu mở mỗi 5 phút)
-    next_open_minute = ((now.minute // 5) * 5 + 5) % 60
-    next_open_hour = now.hour
-    if next_open_minute == 0:
-        if now.minute >= 55: # Nếu hiện tại là 55-59 phút, giờ tiếp theo
-             next_open_hour = (now.hour + 1) % 24
-    
-    next_open_time = datetime(now.year, now.month, now.day, next_open_hour, next_open_minute, 0)
-    # Nếu thời gian mở cửa tiếp theo đã qua, chuyển sang phiên kế tiếp
-    if next_open_time < now:
-        next_open_time += timedelta(minutes=5)
-    
-    next_open_formatted_time = next_open_time.strftime("%H:%M")
-
-    message = (
-        f"🤖 **TOOL TX PRO AI**\n"
-        f"⏳ **Thời gian hiện tại:** `{formatted_time}`\n"
-        f"⏰ **Phiên tới lúc:** `{next_open_formatted_time}`\n\n"
-        f"📊 **Dự đoán:** `{prediction_text}`\n\n"
-        f"**Chúc bạn may mắn!**\n"
-        f"💡 Lưu ý: Đây chỉ là dự đoán dựa trên AI, không đảm bảo thắng 100%."
-    )
-    return message
-
-
-# ==============================================================================
-# 4. HANDLERS LỆNH TELEGRAM
-# ==============================================================================
-
-@bot.message_handler(commands=['start'])
-async def start_command_handler(message):
-    chat_id = message.chat.id
-    key_name, user_info = get_user_info_by_chat_id(chat_id)
-
-    if user_info:
-        # Nếu người dùng đã có key (tức là đã đăng nhập hoặc được /capkey)
-        # BẬT trạng thái nhận dự đoán cho key này và gán current_chat_id nếu chưa có
-        user_info['is_receiving_predictions'] = True
-        user_info['current_chat_id'] = chat_id # Đảm bảo chat_id hiện tại được gán
-        if chat_id not in user_info.get('assigned_chat_ids', []):
-            user_info.setdefault('assigned_chat_ids', []).append(chat_id)
-        save_user_data()
-        await send_telegram_message(chat_id, "✅ **Chào mừng bạn quay lại!**\nBạn đã bắt đầu nhận dự đoán từ Bot. Sử dụng `/stop` để tạm dừng.")
-        logger.info(f"Người dùng {chat_id} (key: {key_name}) đã bấm /start. Đã bật nhận dự đoán.")
-    else:
-        # Nếu người dùng chưa có key nào được liên kết
-        await send_telegram_message(chat_id, "🤖 **Chào mừng bạn đến với Tool TX Pro AI!**\nĐể sử dụng bot, vui lòng nhập key của bạn theo cú pháp: `/key [tên_key_của_bạn]`\n\nNếu bạn là Admin hoặc CTV của Quangdz, hãy nhập key mặc định của bạn (ví dụ: `/key quangdz`).\n\nSử dụng `/help` để xem các lệnh hỗ trợ.")
-        logger.info(f"Người dùng mới {chat_id} đã bấm /start. Đang chờ key.")
-
-@bot.message_handler(commands=['help'])
-async def help_command_handler(message):
-    chat_id = message.chat.id
-    key_name, user_info = get_user_info_by_chat_id(chat_id)
-
-    help_message = (
-        "📚 **Hướng dẫn sử dụng Tool TX Pro AI**\n\n"
-        "Các lệnh phổ biến:\n"
-        "• `/start`: Bắt đầu/tiếp tục nhận dự đoán.\n"
-        "• `/stop`: Tạm dừng nhận dự đoán.\n"
-        "• `/key [tên_key]`: Nhập key để sử dụng bot. Ví dụ: `/key quangdz`\n"
-    )
-
-    if user_info and user_info.get('is_admin'):
-        help_message += (
-            "\n👑 **Lệnh Admin:**\n"
-            "• `/viewkeys`: Xem danh sách tất cả các key.\n"
-            "• `/addkey [tên_key] [Admin/User] [thời_hạn_giờ]`: Tạo key mới. Ví dụ: `/addkey testkey User 72` (key dùng 3 ngày).\n"
-            "• `/delkey [tên_key]`: Xóa một key.\n"
-            "• `/capkey [chat_id] [tên_key] [thời_hạn_giờ]`: Gán key có sẵn cho một chat_id. Ví dụ: `/capkey 123456789 testkey 24` (gán key 'testkey' cho chat_id '123456789' dùng 1 ngày).\n"
-            "• `/adminkey [tên_key]`: Cấp quyền admin cho một key.\n"
-            "• `/unadminkey [tên_key]`: Hủy quyền admin của một key.\n"
-            "• `/statuskey [tên_key]`: Xem trạng thái chi tiết của một key.\n"
-            "• `/kick [chat_id]`: Gỡ key khỏi một chat_id và hủy nhận dự đoán.\n"
-            "• `/resetai`: Xóa dữ liệu AI đã học (pattern_counter và dulieu_ai).\n"
-            "• `/captime [tên_key] [thời_gian_giờ]`: Gia hạn thời gian cho key. Ví dụ: `/captime testkey 24` (gia hạn thêm 24 giờ).\n"
-        )
-    help_message += "\nNếu có bất kỳ thắc mắc nào, vui lòng liên hệ Admin."
-    await send_telegram_message(chat_id, help_message)
-    logger.info(f"Người dùng {chat_id} đã yêu cầu trợ giúp.")
-
-@bot.message_handler(commands=['key'])
-async def key_command_handler(message):
-    chat_id = message.chat.id
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await send_telegram_message(chat_id, "❌ **Sai cú pháp.**\nVui lòng nhập key theo cú pháp: `/key [tên_key_của_bạn]`")
-        return
-
-    input_key = args[1].strip().lower()
-    user_info = get_user_info_by_key(input_key)
-
-    if user_info:
-        # Kiểm tra nếu key đã được liên kết với một chat_id khác (trừ admin)
-        current_linked_chat_id = user_info.get('current_chat_id')
-        if current_linked_chat_id and current_linked_chat_id != chat_id and not user_info.get('is_admin'):
-            await send_telegram_message(chat_id, "⚠️ **Key này đang được sử dụng bởi một thiết bị khác.**\nVui lòng liên hệ Admin nếu bạn tin đây là lỗi.")
-            logger.warning(f"Người dùng {chat_id} cố gắng sử dụng key '{input_key}' đang được dùng bởi {current_linked_chat_id}.")
-            return
-
-        # Kiểm tra thời hạn của key
-        expiry_time_str = user_info.get('expiry_time')
-        if expiry_time_str:
-            expiry_time = datetime.fromisoformat(expiry_time_str)
-            if datetime.now() >= expiry_time:
-                await send_telegram_message(chat_id, "⚠️ **Key của bạn đã hết hạn.**\nVui lòng liên hệ Admin để gia hạn.")
-                user_info['is_receiving_predictions'] = False # Tắt nhận dự đoán
-                save_user_data()
-                logger.info(f"Key '{input_key}' của người dùng {chat_id} đã hết hạn khi cố gắng đăng nhập.")
-                return
-
-        user_info['is_receiving_predictions'] = True
-        user_info['current_chat_id'] = chat_id
-        if chat_id not in user_info.get('assigned_chat_ids', []):
-            user_info.setdefault('assigned_chat_ids', []).append(chat_id)
-        save_user_data()
-        await send_telegram_message(chat_id, "✅ **Xác thực key thành công!**\nBạn đã bắt đầu nhận dự đoán từ Bot. Sử dụng `/stop` để tạm dừng.")
-        logger.info(f"Người dùng {chat_id} đã đăng nhập thành công với key: {input_key}.")
-    else:
-        await send_telegram_message(chat_id, "❌ **Key không hợp lệ hoặc không tồn tại.**\nVui lòng kiểm tra lại key của bạn hoặc liên hệ Admin.")
-        logger.warning(f"Người dùng {chat_id} đã nhập key không hợp lệ: '{input_key}'.")
-
-@bot.message_handler(commands=['stop'])
-async def stop_command_handler(message):
-    chat_id = message.chat.id
-    key_name, user_info = get_user_info_by_chat_id(chat_id)
-
-    if user_info:
-        user_info['is_receiving_predictions'] = False
-        save_user_data()
-        await send_telegram_message(chat_id, "⏸️ **Đã tạm dừng nhận dự đoán.**\nSử dụng `/start` để tiếp tục.")
-        logger.info(f"Người dùng {chat_id} (key: {key_name}) đã bấm /stop. Đã tắt nhận dự đoán.")
-    else:
-        await send_telegram_message(chat_id, "Bạn chưa đăng nhập bằng key nào. Không có dự đoán nào để dừng.")
-        logger.info(f"Người dùng {chat_id} đã bấm /stop nhưng chưa đăng nhập.")
-
-# ==============================================================================
-# 5. LỆNH ADMIN (Chỉ xử lý khi người dùng là Admin)
-# ==============================================================================
-
-def is_admin(chat_id):
-    """Kiểm tra xem người dùng có phải là admin hay không."""
-    for key_name, info in user_data.items():
-        if (info.get('current_chat_id') == chat_id or chat_id in info.get('assigned_chat_ids', [])) and info.get('is_admin'):
-            return True
-    return False
-
-@bot.message_handler(commands=['addkey'])
-async def addkey_command_handler(message):
-    chat_id = message.chat.id
-    if not is_admin(chat_id):
-        await send_telegram_message(chat_id, "🚫 **Bạn không có quyền sử dụng lệnh này.**")
-        return
-
-    args = message.text.split()
-    if len(args) < 3:
-        await send_telegram_message(chat_id, "❌ **Sai cú pháp.**\nSử dụng: `/addkey [tên_key] [Admin/User] [thời_hạn_giờ]`\nVí dụ: `/addkey testkey User 72` (key dùng 3 ngày)")
-        return
-
-    new_key = args[1].strip().lower()
-    key_type = args[2].strip().lower() # 'admin' hoặc 'user'
-    duration_hours = 0
-    if len(args) >= 4:
+        if os.path.exists(LICHSU_FILE):
+            with open(LICHSU_FILE, "r", encoding="utf-8") as f:
+                lich_su = [line.strip() for line in f if line.strip() in ['T', 'X']]
+            lich_su = lich_su[-MAX_PATTERN_LENGTH:]
+    except IOError as e:
+        print(f"{RED}Lỗi khi đọc file lịch sử: {e}{RESET}")
+        lich_su = []
+    # Tải bộ đếm pattern
+    if os.path.exists(PATTERN_COUNT_FILE):
         try:
-            duration_hours = int(args[3])
-        except ValueError:
-            await send_telegram_message(chat_id, "❌ **Thời hạn phải là số nguyên (giờ).**")
-            return
+            with open(PATTERN_COUNT_FILE, "r", encoding="utf-8") as f:
+                pattern_counter = defaultdict(lambda: {"T": 0, "X": 0}, json.load(f))
+        except (json.JSONDecodeError, IOError):
+            pattern_counter = defaultdict(lambda: {"T": 0, "X": 0})
+    # Tải các cầu đã định nghĩa
+    cau_dudoan = load_patterns_from_file(DUDOAN_FILE)
+    cau_ai = load_patterns_from_file(AI_FILE)
+    print(f"{GREEN}Đã tải {len(cau_dudoan)} pattern VIP và {len(cau_ai)} pattern AI.{RESET}")
 
-    if new_key in user_data:
-        await send_telegram_message(chat_id, f"⚠️ Key `{new_key}` đã tồn tại. Vui lòng chọn tên key khác.")
-        return
+def load_patterns_from_file(filepath):
+    """Tải các pattern dự đoán từ một file cụ thể."""
+    patterns = {}
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("#") or "=>" not in line: continue
+                    try:
+                        parts = line.split("=>")
+                        pattern, prediction_part = parts[0].strip(), parts[1]
+                        prediction = prediction_part.split("Dự đoán:")[1].strip()[0]
+                        if prediction in ["T", "X"]:
+                            patterns[pattern] = prediction
+                    except IndexError:
+                        continue
+        except IOError as e:
+            print(f"{RED}Lỗi khi đọc file '{filepath}': {e}{RESET}")
+    return patterns
 
-    is_admin_key = False
-    if key_type == 'admin':
-        is_admin_key = True
-        expiry_time = None # Admin key không có thời hạn
-        expiry_display = "Vĩnh viễn (Admin)"
-    elif key_type == 'user':
-        is_admin_key = False
-        if duration_hours > 0:
-            expiry_time = datetime.now() + timedelta(hours=duration_hours)
-            expiry_display = expiry_time.strftime("%d-%m-%Y %H:%M:%S")
-        else:
-            expiry_time = None # Key user không có thời hạn nếu không nhập
-            expiry_display = "Vĩnh viễn (Không khuyến khích cho User)"
-    else:
-        await send_telegram_message(chat_id, "❌ **Loại key không hợp lệ.** Vui lòng dùng `Admin` hoặc `User`.")
-        return
+def cap_nhat_lich_su_file():
+    """Lưu lịch sử cầu hiện tại vào file."""
+    try:
+        with open(LICHSU_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(lich_su))
+    except IOError as e:
+        print(f"{RED}Lỗi khi ghi lịch sử vào file: {e}{RESET}")
 
-    user_data[new_key] = {
-        'is_admin': is_admin_key,
-        'is_receiving_predictions': False,
-        'current_chat_id': None,
-        'assigned_chat_ids': [], # Có thể gán cho nhiều chat_id nhưng chỉ 1 current_chat_id active
-        'created_at': datetime.now().isoformat(),
-        'expiry_time': expiry_time.isoformat() if expiry_time else None
+def save_pattern_counter():
+    """Lưu bộ đếm tần suất vào file JSON."""
+    try:
+        with open(PATTERN_COUNT_FILE, "w", encoding="utf-8") as f:
+            json.dump(pattern_counter, f, ensure_ascii=False, indent=2)
+    except IOError as e:
+        print(f"{RED}Lỗi khi ghi bộ đếm pattern: {e}{RESET}")
+
+def get_data_from_api():
+    """Lấy dữ liệu phiên mới nhất từ API."""
+    try:
+        response = requests.get(HTTP_API_URL, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+        print(f"{YELLOW}Lỗi API hoặc JSON: {e}{RESET}")
+        return None
+
+# ==== LOGIC DỰ ĐOÁN & HỌC HỎI ====
+
+def get_all_predictions(history_str):
+    """
+    Tập hợp dự đoán từ tất cả các nguồn AI.
+    Ưu tiên AI 1 (VIP), sau đó đến AI 2 (Tự học) và AI 3 (Thống kê).
+    """
+    # AI 1: Dựa trên file dudoan.txt (VIP)
+    pred_vip = get_prediction_from_source(history_str, cau_dudoan, "AI 1 (VIP)")
+    # AI 2: Dựa trên file ai_1-2.txt (AI Tự Học)
+    pred_ai_file = get_prediction_from_source(history_str, cau_ai, "AI 2 (Tự Học)")
+    # AI 3: Dựa trên xác suất thống kê
+    pred_stat = get_statistical_prediction(history_str)
+
+    return [p for p in [pred_vip, pred_ai_file, pred_stat] if p is not None]
+
+def get_prediction_from_source(history_str, source_patterns, source_name):
+    """Lấy dự đoán từ một nguồn pattern cụ thể, ưu tiên cầu dài nhất."""
+    for length in range(min(len(history_str), MAX_PATTERN_LENGTH), MIN_PATTERN_LENGTH - 1, -1):
+        pat = history_str[-length:]
+        if pat in source_patterns:
+            prediction = source_patterns[pat]
+            counts = pattern_counter.get(pat, {"T": 0, "X": 0})
+            total = counts['T'] + counts['X']
+            accuracy = (counts[prediction] / total * 100) if total > 0 else 100.0
+            return {"prediction": prediction, "pattern": pat, "accuracy": accuracy, "source": source_name}
+    return None
+
+def get_statistical_prediction(history_str):
+    """AI 3: Dự đoán dựa trên tần suất xuất hiện trong quá khứ."""
+    for length in range(min(len(history_str), MAX_PATTERN_LENGTH), MIN_PATTERN_LENGTH - 1, -1):
+        pat = history_str[-length:]
+        if pat in pattern_counter:
+            counts = pattern_counter[pat]
+            total = counts['T'] + counts['X']
+            if total > 0:
+                rate_T = (counts['T'] / total) * 100
+                rate_X = (counts['X'] / total) * 100
+                if rate_T >= AI_LEARN_THRESHOLD_RATE:
+                    return {"prediction": "T", "pattern": pat, "accuracy": rate_T, "source": "AI 3 (Thống Kê)"}
+                elif rate_X >= AI_LEARN_THRESHOLD_RATE:
+                    return {"prediction": "X", "pattern": pat, "accuracy": rate_X, "source": "AI 3 (Thống Kê)"}
+    return None
+
+def chot_keo_cuoi_cung(predictions):
+    """Tổng hợp các dự đoán để đưa ra khuyến nghị cuối cùng."""
+    if not predictions:
+        return {"ket_qua": "Bỏ qua", "ly_do": "Không có tín hiệu.", "confidence": "Thấp"}
+
+    votes = Counter(p['prediction'] for p in predictions)
+    num_votes = len(predictions)
+
+    if len(votes) == 1:
+        final_prediction = list(votes.keys())[0]
+        return {"ket_qua": final_prediction, "ly_do": f"Đồng thuận {num_votes}/{num_votes}", "confidence": "Rất Cao"}
+
+    # Ưu tiên AI 1 nếu có tín hiệu
+    if any(p['source'] == "AI 1 (VIP)" for p in predictions):
+        vip_pred = next(p for p in predictions if p['source'] == "AI 1 (VIP)")
+        return {"ket_qua": vip_pred['prediction'], "ly_do": f"Ưu tiên AI 1 (VIP)", "confidence": "Cao"}
+
+    # Nếu không có AI 1, chọn theo số đông
+    if votes['T'] > votes['X']:
+        return {"ket_qua": "T", "ly_do": f"Số đông nghiêng về Tài ({votes['T']}/{num_votes})", "confidence": "Trung Bình"}
+    if votes['X'] > votes['T']:
+        return {"ket_qua": "X", "ly_do": f"Số đông nghiêng về Xỉu ({votes['X']}/{num_votes})", "confidence": "Trung Bình"}
+
+    # Nếu xung đột, chọn AI có accuracy cao nhất
+    best_pred = max(predictions, key=lambda p: p['accuracy'])
+    return {
+        "ket_qua": best_pred['prediction'],
+        "ly_do": f"Xung đột, ưu tiên {best_pred['source']} (CX: {best_pred['accuracy']:.1f}%)",
+        "confidence": "Trung Bình"
     }
-    save_user_data()
-    await send_telegram_message(chat_id,
-                                f"✅ **Đã thêm key mới:** `{new_key}`\n"
-                                f"Loại: {'👑 Admin' if is_admin_key else '👤 User'}\n"
-                                f"Thời hạn: {expiry_display}")
-    logger.info(f"Admin {chat_id} đã thêm key mới: {new_key} (Type: {key_type}, Duration: {duration_hours}h).")
 
-@bot.message_handler(commands=['delkey'])
-async def delkey_command_handler(message):
-    chat_id = message.chat.id
-    if not is_admin(chat_id):
-        await send_telegram_message(chat_id, "🚫 **Bạn không có quyền sử dụng lệnh này.**")
+def ai_hoc_hoi(history_before_result, actual_result):
+    """AI học từ kết quả thực tế để cập nhật bộ đếm và tự học cầu mới."""
+    global md5_analysis_result, cau_dudoan, cau_ai # Đảm bảo các biến này được khai báo global
+    if md5_analysis_result == "Gãy":
+        print(f"{YELLOW}MD5 'Gãy', AI bỏ qua việc học phiên này.{RESET}")
         return
 
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await send_telegram_message(chat_id, "❌ **Sai cú pháp.**\nSử dụng: `/delkey [tên_key]`")
-        return
+    history_str = "".join(history_before_result)
+    for length in range(MIN_PATTERN_LENGTH, min(len(history_str), MAX_PATTERN_LENGTH) + 1):
+        pat = history_str[-length:]
+        pattern_counter[pat][actual_result] += 1
 
-    target_key = args[1].strip().lower()
-    if target_key in user_data:
-        # Nếu key đang được sử dụng, thông báo cho người dùng bị xóa
-        if user_data[target_key].get('current_chat_id'):
-            await send_telegram_message(user_data[target_key]['current_chat_id'],
-                                        "⚠️ **Thông báo:**\nKey của bạn đã bị Admin gỡ bỏ. Bạn sẽ không nhận được dự đoán nữa.")
-            logger.info(f"Đã thông báo cho người dùng {user_data[target_key]['current_chat_id']} về việc key '{target_key}' bị xóa.")
+    potential_pat = history_str[-MIN_PATTERN_LENGTH:]
+    if len(potential_pat) == MIN_PATTERN_LENGTH:
+        if potential_pat not in cau_dudoan and potential_pat not in cau_ai:
+            counts = pattern_counter[potential_pat]
+            total = counts['T'] + counts['X']
+            if total >= AI_LEARN_THRESHOLD_COUNT:
+                rate_T = (counts['T'] / total) * 100
+                rate_X = (counts['X'] / total) * 100
+                prediction_to_learn = None
+                if rate_T >= AI_LEARN_THRESHOLD_RATE: prediction_to_learn = 'T'
+                elif rate_X >= AI_LEARN_THRESHOLD_RATE: prediction_to_learn = 'X'
 
-        del user_data[target_key]
-        save_user_data()
-        await send_telegram_message(chat_id, f"✅ **Đã xóa key:** `{target_key}`")
-        logger.info(f"Admin {chat_id} đã xóa key: {target_key}.")
-    else:
-        await send_telegram_message(chat_id, f"⚠️ Key `{target_key}` không tồn tại.")
+                if prediction_to_learn:
+                    try:
+                        with open(AI_FILE, "a", encoding="utf-8") as f:
+                            f.write(f"\n{potential_pat} => Dự đoán: {prediction_to_learn} - Loại cầu: AI Tự Học")
+                        # Tải lại cầu AI sau khi học
+                        # global cau_ai # Đã khai báo ở đầu hàm rồi
+                        cau_ai = load_patterns_from_file(AI_FILE)
+                        print(f"{GREEN}{BOLD}AI 2 đã học pattern mới: {potential_pat} => {prediction_to_learn}{RESET}")
+                    except IOError as e:
+                        print(f"{RED}Lỗi khi ghi cầu mới của AI: {e}{RESET}")
+    save_pattern_counter()
 
-@bot.message_handler(commands=['viewkeys'])
-async def viewkeys_command_handler(message):
-    chat_id = message.chat.id
-    if not is_admin(chat_id):
-        await send_telegram_message(chat_id, "🚫 **Bạn không có quyền sử dụng lệnh này.**")
-        return
-
-    if not user_data:
-        await send_telegram_message(chat_id, "📋 **Hiện không có key nào trong hệ thống.**")
-        return
-
-    response = "📋 **Danh sách các Key hiện có:**\n\n"
-    for key, info in user_data.items():
-        status = "🟢 Đang hoạt động" if info.get('is_receiving_predictions') else "🔴 Đang dừng"
-        admin_status = "👑 Admin" if info.get('is_admin') else "👤 User"
-        linked_chat_id = info.get('current_chat_id', 'N/A')
-        assigned_ids = ', '.join(map(str, info.get('assigned_chat_ids', []))) if info.get('assigned_chat_ids') else 'N/A'
-
-        expiry_time_str = info.get('expiry_time')
-        expiry_display = "Vĩnh viễn"
-        if expiry_time_str:
-            expiry_time = datetime.fromisoformat(expiry_time_str)
-            if expiry_time < datetime.now():
-                expiry_display = f"Đã hết hạn ({expiry_time.strftime('%d/%m %H:%M')})"
-            else:
-                remaining_time = expiry_time - datetime.now()
-                days = remaining_time.days
-                hours, remainder = divmod(remaining_time.seconds, 3600)
-                minutes, seconds = divmod(remainder, 60)
-                expiry_display = f"Còn {days}d {hours}h {minutes}m ({expiry_time.strftime('%d/%m %H:%M')})"
-
-        response += (
-            f"🔑 `{key}`\n"
-            f"  - Loại: {admin_status}\n"
-            f"  - Trạng thái: {status}\n"
-            f"  - Chat ID đang dùng: `{linked_chat_id}`\n"
-            f"  - Các Chat ID đã gán: `{assigned_ids}`\n"
-            f"  - Hạn dùng: {expiry_display}\n\n"
-        )
-    await send_telegram_message(chat_id, response)
-    logger.info(f"Admin {chat_id} đã xem danh sách key.")
-
-
-@bot.message_handler(commands=['capkey'])
-async def capkey_command_handler(message):
-    chat_id = message.chat.id
-    if not is_admin(chat_id):
-        await send_telegram_message(chat_id, "🚫 **Bạn không có quyền sử dụng lệnh này.**")
-        return
-
-    args = message.text.split()
-    if len(args) < 4:
-        await send_telegram_message(chat_id, "❌ **Sai cú pháp.**\nSử dụng: `/capkey [chat_id] [tên_key] [thời_hạn_giờ]`\nVí dụ: `/capkey 123456789 testkey 24`")
-        return
-
+def log_prediction_data(phien_du_doan, history_str, all_preds, final_choice, actual_result=None, is_win=None):
+    """Ghi lại toàn bộ dữ liệu của một phiên vào file dulieu_ai.json."""
+    log_entry = {
+        "phien": phien_du_doan,
+        "thoi_gian": datetime.now().isoformat(),
+        "lich_su_cau": history_str,
+        "tin_hieu_ai": [{"source": p["source"], "prediction": p["prediction"], "pattern": p["pattern"], "accuracy": p["accuracy"]} for p in all_preds],
+        "khuyen_nghi": final_choice,
+        "ket_qua_thuc_te": actual_result,
+        "thang": is_win
+    }
     try:
-        target_chat_id = int(args[1])
-        target_key = args[2].strip().lower()
-        duration_hours = int(args[3])
-    except ValueError:
-        await send_telegram_message(chat_id, "❌ **Chat ID hoặc thời hạn không hợp lệ.**")
-        return
+        logs = []
+        if os.path.exists(DULIEU_AI_FILE):
+            with open(DULIEU_AI_FILE, "r", encoding="utf-8") as f:
+                logs = json.load(f)
+        
+        # Tìm và cập nhật nếu log đã tồn tại, ngược lại thì thêm mới
+        updated = False
+        for i, log in enumerate(logs):
+            if log["phien"] == phien_du_doan:
+                logs[i] = log_entry
+                updated = True
+                break
+        if not updated:
+            logs.append(log_entry)
 
-    user_info = get_user_info_by_key(target_key)
-    if not user_info:
-        await send_telegram_message(chat_id, f"⚠️ Key `{target_key}` không tồn tại. Vui lòng tạo key trước.")
-        return
+        with open(DULIEU_AI_FILE, "w", encoding="utf-8") as f:
+            json.dump(logs, f, ensure_ascii=False, indent=2)
+    except (IOError, json.JSONDecodeError) as e:
+        print(f"{RED}Lỗi khi ghi file nhật ký {DULIEU_AI_FILE}: {e}{RESET}")
 
-    # Cập nhật thông tin key
-    user_info['is_receiving_predictions'] = True
-    user_info['current_chat_id'] = target_chat_id # Gán chat_id này là chat_id hiện tại
-    if target_chat_id not in user_info.get('assigned_chat_ids', []):
-        user_info.setdefault('assigned_chat_ids', []).append(target_chat_id)
 
-    # Cập nhật thời hạn
-    if duration_hours > 0:
-        expiry_time = datetime.now() + timedelta(hours=duration_hours)
-        user_info['expiry_time'] = expiry_time.isoformat()
-        expiry_display = expiry_time.strftime("%d-%m-%Y %H:%M:%S")
+# ==== LOGIC TELEGRAM ====
+
+async def send_telegram_message(message_text):
+    """Gửi tin nhắn đến tất cả các chat_id đang hoạt động."""
+    # Tạo bản sao để tránh lỗi khi sửa đổi tập hợp trong lúc lặp
+    for chat_id in list(active_chat_ids):
+        try:
+            await asyncio.to_thread(bot.send_message, chat_id=chat_id, text=message_text, parse_mode='HTML')
+        except Exception as e:
+            print(f"{RED}Lỗi khi gửi tin nhắn tới {chat_id}: {e}{RESET}")
+            if "bot was blocked by the user" in str(e):
+                active_chat_ids.discard(chat_id)
+
+async def send_prediction_notification(phien_du_doan, predictions, final_choice):
+    """Gửi thông báo DỰ ĐOÁN cho phiên sắp tới."""
+    def format_kq(kq):
+        return f"<b><font color='green'>TÀI</font></b>" if kq == 'T' else f"<b><font color='red'>XỈU</font></b>"
+
+    message = [f"<b>🔮 DỰ ĐOÁN CHO PHIÊN #{phien_du_doan} 🔮</b>"]
+    message.append(f"<b>Lịch sử cầu hiện tại:</b> <code>{''.join(lich_su)}</code>")
+    message.append("─" * 25)
+    message.append("<b>Tín hiệu từ các AI:</b>")
+
+    if predictions:
+        for p in predictions:
+            message.append(f"  - <b>{p['source']}</b>: {format_kq(p['prediction'])} (Cầu: <code>{p['pattern']}</code>, CX: {p['accuracy']:.1f}%)")
     else:
-        user_info['expiry_time'] = None # Không thời hạn
-        expiry_display = "Vĩnh viễn"
+        message.append("  <i>- Không có tín hiệu rõ ràng từ AI.</i>")
 
-    save_user_data()
-
-    await send_telegram_message(chat_id,
-                                f"✅ **Đã cấp key `{target_key}` cho chat ID:** `{target_chat_id}`\n"
-                                f"Thời hạn: {expiry_display}")
-    # Thông báo cho người dùng bị cấp key (nếu bot có thể gửi tin nhắn đến họ)
-    await send_telegram_message(target_chat_id,
-                                f"🎉 **Chúc mừng!**\nBạn đã được Admin cấp key `{target_key}` để sử dụng Tool TX Pro AI.\n"
-                                f"Key của bạn có hạn đến: {expiry_display}\n"
-                                "Bot sẽ bắt đầu gửi dự đoán cho bạn. Sử dụng `/stop` để tạm dừng.")
-    logger.info(f"Admin {chat_id} đã cấp key '{target_key}' cho {target_chat_id} với thời hạn {duration_hours}h.")
-
-
-@bot.message_handler(commands=['adminkey'])
-async def adminkey_command_handler(message):
-    chat_id = message.chat.id
-    if not is_admin(chat_id):
-        await send_telegram_message(chat_id, "🚫 **Bạn không có quyền sử dụng lệnh này.**")
-        return
-
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await send_telegram_message(chat_id, "❌ **Sai cú pháp.**\nSử dụng: `/adminkey [tên_key]`")
-        return
-
-    target_key = args[1].strip().lower()
-    user_info = get_user_info_by_key(target_key)
-
-    if user_info:
-        if user_info['is_admin']:
-            await send_telegram_message(chat_id, f"⚠️ Key `{target_key}` đã là Admin.")
-        else:
-            user_info['is_admin'] = True
-            user_info['expiry_time'] = None # Admin key không có thời hạn
-            save_user_data()
-            await send_telegram_message(chat_id, f"✅ **Đã cấp quyền Admin cho key:** `{target_key}`")
-            logger.info(f"Admin {chat_id} đã cấp quyền admin cho key: {target_key}.")
-            if user_info.get('current_chat_id'):
-                await send_telegram_message(user_info['current_chat_id'], "🎉 **Bạn đã được cấp quyền Admin!**")
+    message.append("─" * 25)
+    final_kq = final_choice['ket_qua']
+    if final_kq == "Bỏ qua":
+        message.append(f"  ▶️ <b>KHUYẾN NGHỊ: <font color='orange'>BỎ QUA</font></b>")
     else:
-        await send_telegram_message(chat_id, f"⚠️ Key `{target_key}` không tồn tại.")
+        confidence = final_choice.get('confidence', 'Không xác định')
+        conf_color = "green" if confidence == "Rất Cao" else "orange" if "Cao" in confidence else "red"
+        message.append(f"  ▶️ <b>KHUYẾN NGHỊ: {format_kq(final_kq)}</b> (Độ tin cậy: <font color='{conf_color}'>{confidence.upper()}</font>)")
+    
+    message.append(f"<i>Lý do: {final_choice['ly_do']}</i>")
+    await send_telegram_message("\n".join(message))
 
-@bot.message_handler(commands=['unadminkey'])
-async def unadminkey_command_handler(message):
-    chat_id = message.chat.id
-    if not is_admin(chat_id):
-        await send_telegram_message(chat_id, "🚫 **Bạn không có quyền sử dụng lệnh này.**")
+
+async def send_result_notification(phien, xx, tong, kq_thucte, prediction_data):
+    """Gửi thông báo KẾT QUẢ của phiên vừa rồi và so sánh với dự đoán."""
+    final_choice = prediction_data['final_choice']
+    is_win = (final_choice['ket_qua'] == kq_thucte) if final_choice['ket_qua'] != "Bỏ qua" else None
+
+    # Cập nhật tỷ lệ thắng
+    for pred_obj in prediction_data['all_predictions']:
+        source_key = pred_obj['source']
+        win_rate_tracker[source_key].append(pred_obj['prediction'] == kq_thucte)
+
+    def format_kq(kq):
+        return f"<b><font color='green'>TÀI</font></b>" if kq == 'T' else f"<b><font color='red'>XỈU</font></b>"
+
+    title = "✅ KẾT QUẢ PHIÊN" if is_win is not False else "❌ KẾT QUẢ PHIÊN"
+    message = [f"<b>{title} #{phien}</b>"]
+    message.append(f"🎲 Xúc xắc: <b>{xx[0]}-{xx[1]}-{xx[2]}</b> (Tổng: {tong}) => {format_kq(kq_thucte)}")
+
+    if is_win is True:
+        message.append(f"🎉 <b>THẮNG!</b> - Dự đoán <b>{format_kq(final_choice['ket_qua'])}</b> đã chính xác.")
+    elif is_win is False:
+        message.append(f"😭 <b>THUA!</b> - Dự đoán <b>{format_kq(final_choice['ket_qua'])}</b>, kết quả là <b>{format_kq(kq_thucte)}</b>.")
+    else: # Bỏ qua
+        message.append(f"⚪️ <b>BỎ QUA</b> - Bot đã không đưa ra khuyến nghị cho phiên này.")
+    
+    # Thêm trạng thái MD5
+    md5_status_color = "red" if md5_analysis_result == "Gãy" else "green"
+    message.append(f"⛓️ Trạng thái MD5: <font color='{md5_status_color}'>{md5_analysis_result.upper()}</font>")
+
+    await send_telegram_message("\n".join(message))
+
+
+# ==== VÒNG LẶP CHÍNH CỦA BOT ====
+async def main_bot_loop():
+    global last_processed_phien, lich_su
+
+    data = get_data_from_api()
+    if not data or not isinstance(data, dict): return
+
+    phien_hien_tai = data.get("Phien")
+    if phien_hien_tai is None or (last_processed_phien and phien_hien_tai <= last_processed_phien):
         return
 
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await send_telegram_message(chat_id, "❌ **Sai cú pháp.**\nSử dụng: `/unadminkey [tên_key]`")
-        return
+    # === XỬ LÝ KẾT QUẢ CỦA PHIÊN TRƯỚC ===
+    if phien_hien_tai in pending_predictions:
+        prediction_data = pending_predictions.pop(phien_hien_tai)
+        xx = [data.get("Xuc_xac_1"), data.get("Xuc_xac_2"), data.get("Xuc_xac_3")]
+        tong = sum(xx)
+        kq_thucte = tai_xiu(tong)
 
-    target_key = args[1].strip().lower()
-    user_info = get_user_info_by_key(target_key)
+        # Gửi thông báo kết quả
+        await send_result_notification(phien_hien_tai, xx, tong, kq_thucte, prediction_data)
+        
+        # Cập nhật lịch sử và cho AI học hỏi
+        lich_su.append(kq_thucte)
+        lich_su = lich_su[-MAX_PATTERN_LENGTH:]
+        cap_nhat_lich_su_file()
+        
+        is_win = (prediction_data['final_choice']['ket_qua'] == kq_thucte) if prediction_data['final_choice']['ket_qua'] != "Bỏ qua" else None
+        log_prediction_data(phien_hien_tai, prediction_data['history_str'], prediction_data['all_predictions'], prediction_data['final_choice'], kq_thucte, is_win)
 
-    if user_info:
-        if not user_info['is_admin']:
-            await send_telegram_message(chat_id, f"⚠️ Key `{target_key}` không phải là Admin.")
-        else:
-            user_info['is_admin'] = False
-            # Khi hủy admin, cần đặt lại thời hạn nếu muốn hoặc để trống
-            user_info['expiry_time'] = None # Hoặc đặt một thời hạn mặc định cho User
-            save_user_data()
-            await send_telegram_message(chat_id, f"✅ **Đã hủy quyền Admin của key:** `{target_key}`")
-            logger.info(f"Admin {chat_id} đã hủy quyền admin của key: {target_key}.")
-            if user_info.get('current_chat_id'):
-                await send_telegram_message(user_info['current_chat_id'], "⚠️ **Quyền Admin của bạn đã bị gỡ bỏ.**")
+        ai_hoc_hoi(prediction_data['history_str'].split(), kq_thucte)
+
     else:
-        await send_telegram_message(chat_id, f"⚠️ Key `{target_key}` không tồn tại.")
+        # Nếu không có dự đoán chờ xử lý (ví dụ: lần chạy đầu tiên), chỉ cập nhật lịch sử
+        kq_thucte = tai_xiu(data.get("Xuc_xac_1") + data.get("Xuc_xac_2") + data.get("Xuc_xac_3"))
+        lich_su.append(kq_thucte)
+        lich_su = lich_su[-MAX_PATTERN_LENGTH:]
+        cap_nhat_lich_su_file()
 
-@bot.message_handler(commands=['statuskey'])
-async def statuskey_command_handler(message):
-    chat_id = message.chat.id
-    if not is_admin(chat_id):
-        await send_telegram_message(chat_id, "🚫 **Bạn không có quyền sử dụng lệnh này.**")
-        return
+    # Cập nhật trạng thái MD5 cho phiên tiếp theo
+    simulate_md5_analysis()
 
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await send_telegram_message(chat_id, "❌ **Sai cú pháp.**\nSử dụng: `/statuskey [tên_key]`")
-        return
+    # === DỰ ĐOÁN CHO PHIÊN TIẾP THEO ===
+    phien_tiep_theo = phien_hien_tai + 1
+    history_str = "".join(lich_su)
 
-    target_key = args[1].strip().lower()
-    user_info = get_user_info_by_key(target_key)
+    all_predictions = get_all_predictions(history_str)
+    final_choice = chot_keo_cuoi_cung(all_predictions)
+    
+    # Gửi thông báo dự đoán
+    await send_prediction_notification(phien_tiep_theo, all_predictions, final_choice)
 
-    if user_info:
-        status = "🟢 Đang hoạt động" if user_info.get('is_receiving_predictions') else "🔴 Đang dừng"
-        admin_status = "👑 Admin" if user_info.get('is_admin') else "👤 User"
-        linked_chat_id = user_info.get('current_chat_id', 'N/A')
-        assigned_ids = ', '.join(map(str, user_info.get('assigned_chat_ids', []))) if user_info.get('assigned_chat_ids') else 'N/A'
-        created_at_str = user_info.get('created_at', 'N/A')
-        created_at_display = datetime.fromisoformat(created_at_str).strftime("%d-%m-%Y %H:%M:%S") if created_at_str != 'N/A' else 'N/A'
+    # Lưu dự đoán này vào danh sách chờ
+    pending_predictions[phien_tiep_theo] = {
+        "history_str": history_str,
+        "all_predictions": all_predictions,
+        "final_choice": final_choice
+    }
+    # Ghi log ban đầu (chưa có kết quả)
+    log_prediction_data(phien_tiep_theo, history_str, all_predictions, final_choice)
 
-        expiry_time_str = user_info.get('expiry_time')
-        expiry_display = "Vĩnh viễn"
-        if expiry_time_str:
-            expiry_time = datetime.fromisoformat(expiry_time_str)
-            if expiry_time < datetime.now():
-                expiry_display = f"Đã hết hạn ({expiry_time.strftime('%d/%m %H:%M')})"
-            else:
-                remaining_time = expiry_time - datetime.now()
-                days = remaining_time.days
-                hours, remainder = divmod(remaining_time.seconds, 3600)
-                minutes, seconds = divmod(remainder, 60)
-                expiry_display = f"Còn {days}d {hours}h {minutes}m ({expiry_time.strftime('%d/%m %H:%M')})"
 
-        response = (
-            f"🔍 **Thông tin Key:** `{target_key}`\n"
-            f"  - Loại: {admin_status}\n"
-            f"  - Trạng thái: {status}\n"
-            f"  - Chat ID đang dùng: `{linked_chat_id}`\n"
-            f"  - Các Chat ID đã gán: `{assigned_ids}`\n"
-            f"  - Thời gian tạo: {created_at_display}\n"
-            f"  - Hạn dùng: {expiry_display}\n"
-        )
-        await send_telegram_message(chat_id, response)
-        logger.info(f"Admin {chat_id} đã xem trạng thái key: {target_key}.")
+    last_processed_phien = phien_hien_tai
+    os.system('cls' if os.name == 'nt' else 'clear')
+    print(f"{BOLD}Đã xử lý phiên #{phien_hien_tai}, dự đoán cho phiên #{phien_tiep_theo}.{RESET}")
+    print(f"Lịch sử cầu: {history_str}")
+    print(f"Dự đoán chờ xử lý: {list(pending_predictions.keys())}")
+
+
+def simulate_md5_analysis():
+    """Mô phỏng kết quả MD5: 2 Gãy -> 1 Khác."""
+    global md5_giai_doan_counter, md5_analysis_result
+    if md5_giai_doan_counter < 2:
+        md5_analysis_result = "Gãy"
+        md5_giai_doan_counter += 1
     else:
-        await send_telegram_message(chat_id, f"⚠️ Key `{target_key}` không tồn tại.")
+        md5_analysis_result = "Khác"
+        md5_giai_doan_counter = 0
 
+# ==== HÀM KHỞI CHẠY BOT ====
+def start_command_handler(message):
+    active_chat_ids.add(message.chat.id)
+    bot.reply_to(message, "✅ <b>Bot đã được kích hoạt!</b>\nTôi sẽ tự động gửi dự đoán cho các phiên sắp tới.", parse_mode='HTML')
+    print(f"{GREEN}Đã nhận /start từ {message.chat.id}{RESET}")
 
-@bot.message_handler(commands=['kick'])
-async def kick_command_handler(message):
-    chat_id = message.chat.id
-    if not is_admin(chat_id):
-        await send_telegram_message(chat_id, "🚫 **Bạn không có quyền sử dụng lệnh này.**")
-        return
+def stop_command_handler(message):
+    active_chat_ids.discard(message.chat.id)
+    bot.reply_to(message, "❌ <b>Bot đã tạm dừng.</b>\nGõ /start để nhận lại dự đoán.", parse_mode='HTML')
+    print(f"{YELLOW}Đã nhận /stop từ {message.chat.id}{RESET}")
 
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await send_telegram_message(chat_id, "❌ **Sai cú pháp.**\nSử dụng: `/kick [chat_id]`")
-        return
-
-    try:
-        target_chat_id = int(args[1])
-    except ValueError:
-        await send_telegram_message(chat_id, "❌ **Chat ID không hợp lệ.**")
-        return
-
-    found_key = False
-    for key_name, info in user_data.items():
-        if info.get('current_chat_id') == target_chat_id or target_chat_id in info.get('assigned_chat_ids', []):
-            info['is_receiving_predictions'] = False
-            if info.get('current_chat_id') == target_chat_id:
-                info['current_chat_id'] = None
-            if target_chat_id in info.get('assigned_chat_ids', []):
-                info['assigned_chat_ids'].remove(target_chat_id)
-            save_user_data()
-            await send_telegram_message(chat_id, f"✅ **Đã gỡ key của chat ID:** `{target_chat_id}` (key: `{key_name}`).")
-            await send_telegram_message(target_chat_id, "⚠️ **Thông báo:**\nKey của bạn đã bị Admin gỡ bỏ khỏi thiết bị này. Bạn sẽ không nhận được dự đoán nữa.")
-            logger.info(f"Admin {chat_id} đã kick chat_id {target_chat_id} (key: {key_name}).")
-            found_key = True
-            break # Giả định mỗi chat_id chỉ liên kết với 1 key chính
-
-    if not found_key:
-        await send_telegram_message(chat_id, f"⚠️ Không tìm thấy key nào liên kết với chat ID: `{target_chat_id}`.")
-
-
-@bot.message_handler(commands=['resetai'])
-async def resetai_command_handler(message):
-    chat_id = message.chat.id
-    if not is_admin(chat_id):
-        await send_telegram_message(chat_id, "🚫 **Bạn không có quyền sử dụng lệnh này.**")
-        return
-
-    global pattern_counter, dulieu_ai
-    pattern_counter = {}
-    dulieu_ai = {}
-    save_json_data(pattern_counter, PATTERN_COUNT_FILE)
-    save_json_data(dulieu_ai, DULIEU_AI_FILE)
-
-    # Xóa nội dung các file text
-    save_text_data([], LICHSU_FILE)
-    save_text_data([], DUDOAN_FILE)
-    save_text_data([], AI_FILE)
-
-    await send_telegram_message(chat_id, "✅ **Đã reset toàn bộ dữ liệu AI và các file lịch sử/dự đoán.**")
-    logger.info(f"Admin {chat_id} đã reset toàn bộ dữ liệu AI.")
-
-@bot.message_handler(commands=['captime'])
-async def captime_command_handler(message):
-    chat_id = message.chat.id
-    if not is_admin(chat_id):
-        await send_telegram_message(chat_id, "🚫 **Bạn không có quyền sử dụng lệnh này.**")
-        return
-
-    args = message.text.split()
-    if len(args) < 3:
-        await send_telegram_message(chat_id, "❌ **Sai cú pháp.**\nSử dụng: `/captime [tên_key] [thời_gian_giờ]`\nVí dụ: `/captime testkey 24` (gia hạn thêm 24 giờ).")
-        return
-
-    target_key = args[1].strip().lower()
-    try:
-        add_hours = int(args[2])
-    except ValueError:
-        await send_telegram_message(chat_id, "❌ **Thời gian gia hạn phải là số giờ nguyên.**")
-        return
-
-    user_info = get_user_info_by_key(target_key)
-    if not user_info:
-        await send_telegram_message(chat_id, f"⚠️ Key `{target_key}` không tồn tại.")
-        return
-
-    if user_info.get('is_admin'):
-        await send_telegram_message(chat_id, f"⚠️ Key Admin `{target_key}` không có thời hạn, không cần gia hạn.")
-        return
-
-    current_expiry_time_str = user_info.get('expiry_time')
-    if current_expiry_time_str:
-        current_expiry_time = datetime.fromisoformat(current_expiry_time_str)
-        # Nếu đã hết hạn, gia hạn từ bây giờ. Nếu chưa, gia hạn thêm vào thời hạn cũ.
-        if current_expiry_time < datetime.now():
-            new_expiry_time = datetime.now() + timedelta(hours=add_hours)
-        else:
-            new_expiry_time = current_expiry_time + timedelta(hours=add_hours)
-    else:
-        # Nếu key chưa có thời hạn (nhưng không phải admin key), đặt thời hạn từ bây giờ
-        new_expiry_time = datetime.now() + timedelta(hours=add_hours)
-
-    user_info['expiry_time'] = new_expiry_time.isoformat()
-    save_user_data()
-
-    await send_telegram_message(chat_id,
-                                f"✅ **Đã gia hạn key `{target_key}` thêm {add_hours} giờ.**\n"
-                                f"Thời hạn mới: {new_expiry_time.strftime('%d-%m-%Y %H:%M:%S')}")
-    if user_info.get('current_chat_id'):
-        await send_telegram_message(user_info['current_chat_id'],
-                                    f"🎉 **Key của bạn đã được gia hạn thêm {add_hours} giờ!**\n"
-                                    f"Thời hạn mới: {new_expiry_time.strftime('%d-%m-%Y %H:%M:%S')}")
-    logger.info(f"Admin {chat_id} đã gia hạn key '{target_key}' thêm {add_hours} giờ.")
-
-
-# ==============================================================================
-# 6. CÁC HÀM XỬ LÝ KHÁC (nếu có - ví dụ: xử lý tin nhắn không phải lệnh)
-# ==============================================================================
-
-@bot.message_handler(func=lambda message: True)
-async def echo_all(message):
-    chat_id = message.chat.id
-    key_name, user_info = get_user_info_by_chat_id(chat_id)
-
-    if user_info:
-        # Người dùng đã có key, có thể hướng dẫn lại hoặc bỏ qua
-        # Nếu không phải admin, chỉ phản hồi đơn giản
-        if not user_info.get('is_admin'):
-            await send_telegram_message(chat_id, "Tôi chỉ hiểu các lệnh bắt đầu bằng `/`. Sử dụng `/help` để xem danh sách lệnh.")
-            logger.info(f"Người dùng {chat_id} (key: {key_name}) gửi tin nhắn không phải lệnh: '{message.text}'")
-        else:
-            # Admin có thể gửi bất kỳ tin nhắn nào mà không cần phản hồi
-            pass
-    else:
-        # Người dùng chưa có key, luôn nhắc nhập key
-        await send_telegram_message(chat_id, "Bạn cần nhập key để sử dụng bot. Vui lòng nhập `/key [tên_key_của_bạn]` hoặc `/help` để biết thêm.")
-        logger.info(f"Người dùng chưa xác thực {chat_id} gửi tin nhắn: '{message.text}'")
-
-
-# ==============================================================================
-# 7. CHẠY BOT VÀ SERVER FLASK
-# ==============================================================================
-
-# Khởi tạo Flask App (cho webhook hoặc để Render giữ cho process chạy)
+# ==== FLASK SERVER ĐỂ GIỮ DỊCH VỤ LUÔN CHẠY TRÊN RENDER (NẾU DÙNG WEB SERVICE) ====
 app = Flask(__name__)
 
 @app.route('/')
-def index():
-    return "Bot Telegram đang chạy!", 200
-
-@app.route(f'/{TELEGRAM_BOT_TOKEN}', methods=['POST'])
-def webhook():
-    if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        # Sử dụng asyncio.run_coroutine_threadsafe để chạy hàm async từ thread Flask
-        asyncio.run_coroutine_threadsafe(bot.process_new_updates([update]), loop)
-        return '!', 200
-    else:
-        abort(403)
-
-async def start_polling():
-    """Khởi động polling của telebot trong một vòng lặp sự kiện riêng."""
-    # bot.infinity_polling(timeout=10, long_polling_timeout=5)
-    # Với async, chúng ta nên sử dụng aiohttp webhook hoặcpolling thủ công
-    # Nhưng với mục đích đơn giản, chúng ta có thể gọi polling trong một loop riêng
-    logger.info("Bắt đầu polling Telegram...")
-    while True:
-        try:
-            bot.polling(non_stop=True, interval=0) # Sử dụng non_stop=True và interval=0 để polling nhanh
-        except Exception as e:
-            logger.error(f"Lỗi polling Telegram: {e}", exc_info=True)
-            await asyncio.sleep(5) # Đợi 5 giây trước khi thử lại
-        await asyncio.sleep(1) # Ngủ ngắn để tránh chiếm dụng CPU quá mức
-
-async def periodic_tasks():
-    """Chạy các tác vụ định kỳ như gửi dự đoán."""
-    while True:
-        await check_and_send_predictions()
-        await asyncio.sleep(60) # Chờ 60 giây (1 phút) trước khi kiểm tra lại
-
+def hello_world():
+    # Render sẽ gửi request HTTP đến '/' để kiểm tra dịch vụ có hoạt động không
+    # Chỉ cần trả về một chuỗi đơn giản để Render biết rằng ứng dụng đang "sống"
+    return 'Bot is running and Flask server is active!'
 
 def run_flask_app():
-    """Chạy ứng dụng Flask trên một luồng riêng."""
-    port = int(os.environ.get("PORT", 5000))
-    # Sử dụng '0.0.0.0' để Flask lắng nghe trên tất cả các địa chỉ IP có sẵn
-    # Điều này quan trọng khi triển khai trên Render
+    # Lấy port từ biến môi trường của Render (mặc định là 10000 nếu không tìm thấy)
+    port = int(os.environ.get("PORT", 10000))
+    print(f"{YELLOW}Bắt đầu Flask server trên cổng {port} để giữ dịch vụ luôn chạy...{RESET}")
+    # app.run là blocking, cần chạy trong một thread riêng hoặc asyncio.to_thread
     app.run(host='0.0.0.0', port=port, debug=False)
-    logger.info(f"Flask server đang lắng nghe trên cổng {port}")
+
+
+async def run_main_loop_periodically():
+    while True:
+        try:
+            if active_chat_ids:
+                await main_bot_loop()
+        except Exception as e:
+            print(f"{RED}Lỗi trong vòng lặp chính: {e}{RESET}")
+            import traceback
+            traceback.print_exc() # In chi tiết lỗi để debug
+        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
 async def main():
-    logger.info("=== TOOL TX PRO AI V3 (CHỦ ĐỘNG) ===")
+    global bot
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not TELEGRAM_BOT_TOKEN:
+        print(f"{RED}{BOLD}LỖI: Biến môi trường TELEGRAM_BOT_TOKEN chưa được đặt.{RESET}")
+        return
 
-    # Tải dữ liệu khi khởi động bot
-    global user_data, dulieu_ai, pattern_counter
-    user_data = load_json_data(USER_DATA_FILE, {})
-    dulieu_ai = load_json_data(DULIEU_AI_FILE, {})
-    pattern_counter = load_json_data(PATTERN_COUNT_FILE, {})
+    bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+    bot.register_message_handler(start_command_handler, commands=['start'])
+    bot.register_message_handler(stop_command_handler, commands=['stop'])
 
-    logger.info("Dữ liệu đã được tải.")
+    load_data()
+    print(f"{BOLD}{GREEN}=== TOOL TX PRO AI V3 (CHỦ ĐỘNG) ===")
+    print(f"Bot đã sẵn sàng. Đang chờ lệnh /start...{RESET}")
 
-    # Khởi chạy Flask server trong một luồng riêng
-    flask_thread = threading.Thread(target=run_flask_app, daemon=True)
+    # Khởi chạy Flask server trong một thread riêng để nó không block asyncio event loop
+    import threading
+    flask_thread = threading.Thread(target=run_flask_app)
+    flask_thread.daemon = True # Đặt thread là daemon để nó tự tắt khi chương trình chính kết thúc
     flask_thread.start()
-    logger.info("Flask server thread đã khởi chạy.")
-
-    # Khởi chạy các tác vụ định kỳ (gửi dự đoán) trong một task asyncio
-    asyncio.create_task(periodic_tasks())
-    logger.info("Vòng lặp bot chính đã được lên lịch.")
-
-    # Bắt đầu polling bot
-    await start_polling() # Polling là hàm blocking, nên cần chạy cuối cùng hoặc trong một luồng/task riêng
+    
+    asyncio.create_task(run_main_loop_periodically())
+    
+    print(f"{YELLOW}Bắt đầu polling Telegram...{RESET}")
+    # Chạy polling trong một thread khác để không chặn event loop chính
+    await asyncio.to_thread(bot.polling, none_stop=True, interval=0, timeout=20)
 
 if __name__ == "__main__":
-    # Đảm bảo có một event loop đang chạy
     try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    # Chạy hàm main trong event loop
-    loop.run_until_complete(main())
+        os.system('cls' if os.name == 'nt' else 'clear')
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print(f"\n{RED}{BOLD}Đã dừng bot.{RESET}")
+    except Exception as e:
+        print(f"\n{RED}{BOLD}Lỗi nghiêm trọng: {e}{RESET}")
+        import traceback
+        traceback.print_exc()
