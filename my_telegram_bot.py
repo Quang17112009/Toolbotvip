@@ -30,7 +30,7 @@ AI_LEARN_THRESHOLD_RATE = 75
 
 # --- Cấu hình quyền hạn ---
 # THAY THẾ BẰNG CHAT_ID CỦA ADMIN MẶC ĐỊNH (là ID của bạn)
-ADMIN_CHAT_ID = "123456789" # <-- VUI LÒNG THAY THẾ BẰNG ID TELEGRAM CỦA BẠN
+ADMIN_CHAT_ID = "6915752059" # <-- VUI LÒNG THAY THẾ BẰNG ID TELEGRAM CỦA BẠN
 DEFAULT_ADMIN_KEY = "quangdz" # Key admin mặc định khi admin đăng nhập lần đầu
 
 # --- MÀU SẮC CHO CONSOLE ---
@@ -1059,7 +1059,7 @@ async def main():
     # 2. HÃY HOÀN TÁC (REVERT) LẠI SAU KHI ĐÃ DEBUG XONG VÀ BOT CHẠY ĐƯỢC.
     # 3. THAY THẾ "YOUR_TELEGRAM_BOT_TOKEN_HERE" BẰNG TOKEN THỰC CỦA BẠN.
     # TOKEN của bạn là: 8080593458:AAFfIN0hVbZBflDCFAb-pJ51cysDoWRcsZU
-    bot.token = "8080593458:AAFfIN0hVbZBflDCFAb-pJ51cysDoWRcsZU"
+    bot.token = "7912572586:AAEcZZmzXVjVNM5YO8TbHx1REd1i4gqGqCM"
     print(f"{YELLOW}CẢNH BÁO: Đang chạy với token được hardcode trong code. Vui lòng xóa sau khi debug xong để đảm bảo an toàn!{RESET}")
 
     # Các dòng lấy token từ biến môi trường sẽ bị bỏ qua (hoặc comment lại)
