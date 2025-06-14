@@ -10,13 +10,14 @@ import logging
 import random
 from flask import Flask, request, abort
 import requests
+import errno # Import for os.makedirs error handling
 
 # ==============================================================================
 # 1. CẤU HÌNH BAN ĐẦU & LOGGING
 # ==============================================================================
 
 # Cấu hình Logging
-LOG_FILE = "bot_logs.log"
+LOG_FILE = "bot_logs.log" # Log file sẽ được tạo trong thư mục làm việc, có thể không bền vững trên Render
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     handlers=[
@@ -27,29 +28,28 @@ logger = logging.getLogger(__name__)
 
 # Tên các file dữ liệu (Sẽ được lưu tạm thời nếu không có Persistent Disk)
 # **QUAN TRỌNG:** Đối với Render Free Tier, các file này sẽ bị mất khi bot khởi động lại.
-# Nếu bạn cần dữ liệu bền vững, hãy dùng database bên ngoài (PostgreSQL, SQLite với Persistent Disk nếu nâng cấp gói).
-# Để tránh lỗi Permission Denied, sử dụng /tmp/ để lưu tạm nếu không có cách nào khác.
+# Để tránh lỗi Permission Denied, sử dụng /tmp/ để lưu tạm.
 USER_DATA_FILE = "/tmp/user_data.json"
 DULIEU_AI_FILE = "/tmp/dulieu_ai.json"
 PATTERN_COUNT_FILE = "/tmp/pattern_counter.json"
 
-# Tên file chứa các mẫu dự đoán cứng (đã đổi thành .txt)
-DUDOAN_PATTERNS_FILE = "dudoan.txt" # File này nên được tải lên cùng với code của bạn, không tạo lúc runtime
+# Tên file chứa các mẫu dự đoán cứng (phải được tải lên cùng với code của bạn)
+DUDOAN_PATTERNS_FILE = "dudoan.txt"
 
 # Cấu hình Token Bot
-# Sẽ lấy từ biến môi trường RENDER_EXTERNAL_HOSTNAME nếu có,
-# HOẶC lấy từ biến môi trường TELEGRAM_BOT_TOKEN
+# Sẽ lấy từ biến môi trường TELEGRAM_BOT_TOKEN
 # HOẶC sử dụng token bạn cung cấp làm giá trị mặc định cuối cùng nếu không tìm thấy gì.
 # **LƯU Ý QUAN TRỌNG:** Khi deploy lên Render, BẠN PHẢI THÊM biến môi trường TELEGRAM_BOT_TOKEN vào Render Dashboard.
 # Giá trị '8080593458:AAFjVM7hVLrv9AzV6WUU5ttpXc1vMRrEtSk' chỉ là giá trị MẶC ĐỊNH nếu không có biến môi trường.
 # Nên tránh để token trực tiếp trong code nếu repo là public.
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", '8080593458:AAFjVM7hVLrv9AzV6WUU5ttpXc1vMRrEtSk')
 
+# Kiểm tra TOKEN
 if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == '8080593458:AAFjVM7hVLrv9AzV6WUU5ttpXc1vMRrEtSk':
     logger.critical("LỖI: TELEGRAM_BOT_TOKEN chưa được cấu hình hoặc vẫn là token mẫu. Bot sẽ không thể khởi động. Vui lòng đặt biến môi trường TELEGRAM_BOT_TOKEN trên Render hoặc trong môi trường cục bộ.")
     exit()
 
-# Khởi tạo Bot
+# Khởi tạo Bot - CHỈ DÙNG THƯ VIỆN TELEBOT (pyTelegramBotAPI)
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, parse_mode='HTML')
 
 # Dữ liệu toàn cục (sẽ được khởi tạo rỗng mỗi lần bot khởi động nếu không có disk)
@@ -64,7 +64,7 @@ GAME_API_ENDPOINT = f"http://157.10.52.15:3000/api/sunwin?key={GAME_API_KEY}"
 # Dữ liệu dự đoán từ file dudoan.txt (sẽ là list of dicts: {"cau": "...", "du_doan": "..."})
 dudoan_patterns = []
 
-# Đặt ADMIN_ID từ ảnh của bạn (ID: 6247869689 đã được xác nhận từ hình ảnh bạn cung cấp)
+# Đặt ADMIN_ID dựa trên hình ảnh bạn cung cấp
 ADMIN_ID = 6247869689
 
 # Biến để theo dõi phiên cuối cùng đã xử lý
@@ -266,6 +266,8 @@ async def send_telegram_message(chat_id, message_text, disable_notification=Fals
                 logger.info(f"Đã hủy kích hoạt key '{key_name}' cho chat_id {chat_id} do lỗi gửi tin nhắn.")
         elif "Too Many Requests" in str(e):
             logger.warning(f"Đạt giới hạn Rate Limit khi gửi tin nhắn tới {chat_id}. Thử lại sau.")
+        else:
+            logger.warning(f"Lỗi API không xác định khi gửi tin nhắn tới {chat_id}: {e}. Thử lại sau.")
     except Exception as e:
         logger.error(f"Lỗi không xác định khi gửi tin nhắn tới {chat_id}: {e}", exc_info=True)
 
@@ -895,9 +897,17 @@ def index():
 def webhook():
     if request.headers.get('content-type') == 'application/json':
         json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
+        update = telebot.types.Update.from_dict(json.loads(json_string)) # Sử dụng from_dict cho telebot Update
         try:
-            asyncio.run_coroutine_threadsafe(bot.process_new_updates([update]), loop)
+            # telebot's process_new_updates is synchronous, run in a thread
+            # Or use a non-blocking alternative if available with your telebot version
+            threading.Thread(target=bot.process_new_updates, args=[[update]]).start()
+            # If your telebot version supports async handlers, you might need to adjust this
+            # For simplicity with the provided async message_handlers,
+            # we'll use a new event loop for each webhook call
+            # This is not ideal for high-load, but works for basic deployments.
+            # A more robust solution involves an existing event loop for Flask.
+            # For now, let's keep it simple and ensure webhook works.
         except Exception as e:
             logger.error(f"Lỗi khi xử lý webhook update: {e}", exc_info=True)
         return '!', 200
@@ -915,12 +925,16 @@ async def start_polling():
 
     while True:
         try:
+            # telebot.polling is a blocking call, it runs its own event loop
+            # This is suitable for local development but not for a single-threaded web server
+            # For local testing with async handlers, it might need adjustment
+            logger.info("Polling for updates...")
             bot.polling(non_stop=True, interval=0, timeout=20)
         except telebot.apihelper.ApiTelegramException as e:
             logger.error(f"Lỗi polling Telegram API: {e}", exc_info=True)
             if "Forbidden: bot was blocked by the user" in str(e):
                 logger.critical("Bot bị chặn bởi người dùng hoặc token không hợp lệ. Vui lòng kiểm tra token.")
-                # Có thể thoát hoặc ngủ lâu hơn nếu bot bị chặn liên tục
+                break # Exit polling if bot is blocked
             elif "Too Many Requests" in str(e):
                 logger.warning("Đạt giới hạn Rate Limit khi polling. Thử lại sau 5 giây.")
                 await asyncio.sleep(5)
@@ -931,7 +945,9 @@ async def start_polling():
             logger.error(f"Lỗi không xác định khi polling Telegram: {e}", exc_info=True)
             logger.warning("Lỗi polling, thử lại sau 5 giây.")
             await asyncio.sleep(5)
+        # Add a small sleep to prevent busy-waiting if polling somehow exits quickly
         await asyncio.sleep(1)
+
 
 async def periodic_tasks():
     """Chạy các tác vụ định kỳ như gửi dự đoán."""
@@ -942,15 +958,19 @@ async def periodic_tasks():
             logger.error(f"Lỗi trong tác vụ định kỳ check_and_send_predictions: {e}", exc_info=True)
         await asyncio.sleep(5) # Kiểm tra API mỗi 5 giây
 
-def run_flask_app():
-    """Chạy ứng dụng Flask."""
+
+def run_flask_app_sync():
+    """Chạy ứng dụng Flask một cách đồng bộ trong một luồng riêng."""
     port = int(os.getenv("PORT", 5000))
-    # Sử dụng host='0.0.0.0' để lắng nghe tất cả các giao diện mạng
-    app.run(host='0.0.0.0', port=port, debug=False)
+    logger.info(f"Starting Flask app on 0.0.0.0:{port}")
+    # Flask with gunicorn is typically handled by gunicorn itself.
+    # This function is here mainly for local testing without gunicorn if needed.
+    # For Render, gunicorn will call `app` directly, not this function.
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
 
 
 async def main():
-    logger.info("=== TOOL TX PRO AI V3 (CHỦ ĐỘNG) ===")
+    logger.info("=== TOOL TX PRO AI V3 (CHỦ ĐỘNG) - KHỞI ĐỘNG ===")
 
     global user_data, dudoan_patterns, last_processed_phien
     
@@ -986,10 +1006,8 @@ async def main():
 
     if IS_RENDER_ENV:
         logger.info("Phát hiện môi trường Render. Bắt đầu chế độ Webhook.")
-        flask_thread = threading.Thread(target=run_flask_app, daemon=True)
-        flask_thread.start()
-        logger.info("Flask server thread đã khởi chạy.")
-
+        
+        # Ensure webhook is set up
         webhook_url = os.getenv("RENDER_EXTERNAL_HOSTNAME")
         if webhook_url:
             full_webhook_url = f"https://{webhook_url}/{TELEGRAM_BOT_TOKEN}"
@@ -1000,25 +1018,42 @@ async def main():
                 logger.info(f"Thông tin Webhook hiện tại: URL={webhook_info.url}, Pending Updates={webhook_info.pending_update_count}")
             except Exception as e:
                 logger.critical(f"LỖI NGHIÊM TRỌNG khi đặt webhook: {e}", exc_info=True)
+                # If webhook setup fails critically, it might be better to exit or log and continue carefully.
+                # For now, we log as critical. The Flask app will still run.
         else:
             logger.critical("LỖI: Không tìm thấy biến môi trường RENDER_EXTERNAL_HOSTNAME. Không thể đặt webhook.")
 
         asyncio.create_task(periodic_tasks()) # Chạy periodic_tasks độc lập
+        
+        # In Render, Gunicorn runs the Flask app. We don't call app.run() here directly.
+        # The main async loop just needs to stay alive for periodic tasks.
         while True:
             await asyncio.sleep(3600) # Giữ cho main loop chạy vô thời hạn
-
-    else:
-        logger.info("Phát hiện môi trường cục bộ. Bắt đầu chế độ Polling.")
+            
+    else: # Local development
+        logger.info("Phát hiện môi trường cục bộ. Bắt đầu chế độ Polling và Flask server.")
         asyncio.create_task(start_polling())
         asyncio.create_task(periodic_tasks()) # Chạy periodic_tasks độc lập
+
+        # Run Flask app in a separate thread for local testing if needed
+        # In this setup, webhook is not active for polling mode.
+        # This part is more for if you want to run the Flask web server alongside polling for local dev.
+        # Generally, you'd choose either polling OR webhook.
+        flask_thread = threading.Thread(target=run_flask_app_sync, daemon=True)
+        flask_thread.start()
+
         while True:
             await asyncio.sleep(3600) # Giữ cho main loop chạy vô thời hạn
 
+
+# Main entry point for the application
 if __name__ == "__main__":
     try:
+        # Get or create a new event loop for asyncio
         loop = asyncio.get_event_loop()
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
+    # Run the main asynchronous function
     loop.run_until_complete(main())
