@@ -2,12 +2,17 @@ import os
 import json
 import time
 import asyncio
+import threading
+import logging
 from datetime import datetime, timedelta
 from collections import defaultdict, Counter
 import requests
 import telebot
 from flask import Flask, request, abort
-import threading # Import threading here for Flask server
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # ==== CẤU HÌNH ====
 # API URL MỚI
@@ -33,7 +38,7 @@ AI_LEARN_THRESHOLD_RATE = 75
 ADMIN_CHAT_ID = "6915752059" # <-- VUI LÒNG THAY THẾ BẰNG ID TELEGRAM CỦA BẠN
 DEFAULT_ADMIN_KEY = "quangdz" # Key admin mặc định khi admin đăng nhập lần đầu
 
-# --- MÀU SẮC CHO CONSOLE ---
+# --- MÀU SẮC CHO CONSOLE (chỉ dùng cho console, không hiển thị trong logs Render) ---
 RED, GREEN, YELLOW, RESET, BOLD = "\033[91m", "\033[92m", "\033[93m", "\033[0m", "\033[1m"
 
 # ==== BIẾN TOÀN CỤC ====
@@ -45,10 +50,10 @@ cau_ai = {}
 win_rate_tracker = defaultdict(list)
 pending_predictions = {} # {phien_id: data}
 
-# Initialize bot here with the actual token.
-# THIS IS WHERE THE `ValueError` OCCURRED BEFORE.
-# Replace "8080593458:AAFjVM7hVLrv9AzV6WUU5ttpXc1vMRrEtSk" with the real token from BotFather.
-bot = telebot.TeleBot("8080593458:AAFjVM7hVLrv9AzV6WUU5ttpXc1vMRrEtSk", parse_mode='HTML')
+# Initialize bot here.
+# KHUYẾN NGHỊ: COMMENT DÒNG NÀY VÀ SỬ DỤNG BIẾN MÔI TRƯỜNG `TELEGRAM_BOT_TOKEN`
+# bot = telebot.TeleBot("8080593458:AAFfIN0hVbZBflDCFAb-pJ51cysDoWRcsZU", parse_mode='HTML')
+bot = None # Sẽ được khởi tạo sau khi lấy token từ env
 
 # user_data: Bây giờ sẽ dùng key làm khóa chính
 user_data = {} # {key_string: {chat_id: int, expiry_time: timestamp, role: "user/ctv/admin", username: str, current_chat_id: int, max_devices: int, assigned_chat_ids: list, associated_chat_id: int}}
@@ -71,19 +76,20 @@ def load_data():
                 lich_su = [line.strip() for line in f if line.strip() in ['T', 'X']]
             lich_su = lich_su[-MAX_PATTERN_LENGTH:]
     except IOError as e:
-        print(f"{RED}Lỗi khi đọc file lịch sử: {e}{RESET}")
+        logger.error(f"Lỗi khi đọc file lịch sử: {e}")
         lich_su = []
 
     if os.path.exists(PATTERN_COUNT_FILE):
         try:
             with open(PATTERN_COUNT_FILE, "r", encoding="utf-8") as f:
                 pattern_counter = defaultdict(lambda: {"T": 0, "X": 0}, json.load(f))
-        except (json.JSONDecodeError, IOError):
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Lỗi khi đọc file đếm pattern hoặc file rỗng: {e}. Khởi tạo lại.")
             pattern_counter = defaultdict(lambda: {"T": 0, "X": 0})
 
     cau_dudoan = load_patterns_from_file(DUDOAN_FILE)
     cau_ai = load_patterns_from_file(AI_FILE)
-    print(f"{GREEN}Đã tải {len(cau_dudoan)} pattern VIP và {len(cau_ai)} pattern AI.{RESET}")
+    logger.info(f"Đã tải {len(cau_dudoan)} pattern VIP và {len(cau_ai)} pattern AI.")
 
     # Tải dữ liệu người dùng
     if os.path.exists(USER_DATA_FILE):
@@ -96,15 +102,15 @@ def load_data():
                     if 'max_devices' not in info: info['max_devices'] = 1 # Mặc định 1
                     if 'assigned_chat_ids' not in info: info['assigned_chat_ids'] = []
                     if 'associated_chat_id' not in info: info['associated_chat_id'] = None # Dùng cho /capkey
-                print(f"{GREEN}Đã tải {len(user_data)} key người dùng.{RESET}")
+                logger.info(f"Đã tải {len(user_data)} key người dùng.")
         except (json.JSONDecodeError, IOError) as e:
-            print(f"{RED}Lỗi khi đọc file dữ liệu người dùng: {e}{RESET}")
+            logger.error(f"Lỗi khi đọc file dữ liệu người dùng: {e}")
             user_data = {}
 
     # Đảm bảo admin mặc định được khởi tạo nếu ADMIN_CHAT_ID được cấu hình
     admin_exists_by_key = user_data.get(DEFAULT_ADMIN_KEY)
     if admin_exists_by_key and admin_exists_by_key.get('role') == 'admin':
-        pass # Admin key đã tồn tại và là admin
+        logger.info(f"Key Admin mặc định '{DEFAULT_ADMIN_KEY}' đã tồn tại và là admin.")
     else:
         user_data[DEFAULT_ADMIN_KEY] = {
             "key": DEFAULT_ADMIN_KEY,
@@ -117,7 +123,7 @@ def load_data():
             "associated_chat_id": None # Không liên kết trực tiếp với chat_id cụ thể
         }
         save_user_data()
-        print(f"{GREEN}Đã đảm bảo key Admin mặc định '{DEFAULT_ADMIN_KEY}' tồn tại.{RESET}")
+        logger.info(f"Đã đảm bảo key Admin mặc định '{DEFAULT_ADMIN_KEY}' tồn tại.")
 
 
 def load_patterns_from_file(filepath):
@@ -138,7 +144,7 @@ def load_patterns_from_file(filepath):
                     except IndexError:
                         continue
         except IOError as e:
-            print(f"{RED}Lỗi khi đọc file '{filepath}': {e}{RESET}")
+            logger.error(f"Lỗi khi đọc file '{filepath}': {e}")
     return patterns
 
 def cap_nhat_lich_su_file():
@@ -147,7 +153,7 @@ def cap_nhat_lich_su_file():
         with open(LICHSU_FILE, "w", encoding="utf-8") as f:
             f.write("\n".join(lich_su))
     except IOError as e:
-        print(f"{RED}Lỗi khi ghi lịch sử vào file: {e}{RESET}")
+        logger.error(f"Lỗi khi ghi lịch sử vào file: {e}")
 
 def save_pattern_counter():
     """Lưu bộ đếm tần suất vào file JSON."""
@@ -155,7 +161,7 @@ def save_pattern_counter():
         with open(PATTERN_COUNT_FILE, "w", encoding="utf-8") as f:
             json.dump(pattern_counter, f, ensure_ascii=False, indent=2)
     except IOError as e:
-        print(f"{RED}Lỗi khi ghi bộ đếm pattern: {e}{RESET}")
+        logger.error(f"Lỗi khi ghi bộ đếm pattern: {e}")
 
 def save_user_data():
     """Lưu dữ liệu người dùng vào file JSON."""
@@ -163,7 +169,7 @@ def save_user_data():
         with open(USER_DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(user_data, f, ensure_ascii=False, indent=2)
     except IOError as e:
-        print(f"{RED}Lỗi khi ghi dữ liệu người dùng: {e}{RESET}")
+        logger.error(f"Lỗi khi ghi dữ liệu người dùng: {e}")
 
 def get_data_from_api():
     """Lấy dữ liệu phiên mới nhất từ API mới."""
@@ -187,7 +193,7 @@ def get_data_from_api():
             "lich_su_cau_api": lich_su_cau_api
         }
     except (requests.exceptions.RequestException, json.JSONDecodeError, KeyError, ValueError) as e:
-        print(f"{RED}Lỗi khi gọi API hoặc phân tích dữ liệu từ API mới: {e}{RESET}")
+        logger.error(f"Lỗi khi gọi API hoặc phân tích dữ liệu từ API mới: {e}")
         return None
 
 # ==== LOGIC DỰ ĐOÁN & HỌC HỎI ====
@@ -251,7 +257,7 @@ def chot_keo_cuoi_cung(predictions):
     # Nếu không có AI 1, chọn theo số đông
     if votes['T'] > votes['X']:
         return {"ket_qua": "T", "ly_do": f"Số đông nghiêng về Tài ({votes['T']}/{num_votes})", "confidence": "Trung Bình"}
-    if votes['X'] > votes['T']: # <-- Đã sửa lỗi logic ở đây
+    if votes['X'] > votes['T']:
         return {"ket_qua": "X", "ly_do": f"Số đông nghiêng về Xỉu ({votes['X']}/{num_votes})", "confidence": "Trung Bình"}
 
     # Nếu xung đột, chọn AI có accuracy cao nhất
@@ -266,7 +272,7 @@ def ai_hoc_hoi(history_before_result, actual_result):
     """AI học từ kết quả thực tế để cập nhật bộ đếm và tự học cầu mới."""
     global md5_analysis_result, cau_dudoan, cau_ai
     if md5_analysis_result == "Gãy":
-        print(f"{YELLOW}MD5 'Gãy', AI bỏ qua việc học phiên này.{RESET}")
+        logger.info(f"MD5 'Gãy', AI bỏ qua việc học phiên này.")
         return
 
     history_str = "".join(history_before_result)
@@ -294,11 +300,11 @@ def ai_hoc_hoi(history_before_result, actual_result):
                             with open(AI_FILE, "a", encoding="utf-8") as f:
                                 f.write(f"\n{potential_pat} => Dự đoán: {prediction_to_learn} - Loại cầu: AI Tự Học")
                             cau_ai = load_patterns_from_file(AI_FILE) # Tải lại để cập nhật bộ nhớ
-                            print(f"{GREEN}{BOLD}AI 2 đã học pattern mới: {potential_pat} => {prediction_to_learn}{RESET}")
+                            logger.info(f"AI 2 đã học pattern mới: {potential_pat} => {prediction_to_learn}")
                         else:
-                            print(f"{YELLOW}Pattern {potential_pat} đã tồn tại trong AI_FILE, không ghi lại.{RESET}")
+                            logger.info(f"Pattern {potential_pat} đã tồn tại trong AI_FILE, không ghi lại.")
                     except IOError as e:
-                        print(f"{RED}Lỗi khi ghi cầu mới của AI: {e}{RESET}")
+                        logger.error(f"Lỗi khi ghi cầu mới của AI: {e}")
     save_pattern_counter()
 
 def log_prediction_data(phien_du_doan, history_str, all_preds, final_choice, actual_result=None, is_win=None):
@@ -333,7 +339,7 @@ def log_prediction_data(phien_du_doan, history_str, all_preds, final_choice, act
         with open(DULIEU_AI_FILE, "w", encoding="utf-8") as f:
             json.dump(logs, f, ensure_ascii=False, indent=2)
     except (IOError, json.JSONDecodeError) as e:
-        print(f"{RED}Lỗi khi ghi file nhật ký {DULIEU_AI_FILE}: {e}{RESET}")
+        logger.error(f"Lỗi khi ghi file nhật ký {DULIEU_AI_FILE}: {e}")
 
 
 # ==== LOGIC TELEGRAM ====
@@ -341,22 +347,27 @@ def log_prediction_data(phien_du_doan, history_str, all_preds, final_choice, act
 async def send_telegram_message(chat_id, message_text):
     """Gửi tin nhắn đến một chat_id cụ thể."""
     try:
-        # Sử dụng asyncio.to_thread để chạy hàm đồng bộ bot.send_message
+        # bot.send_message là blocking, cần chạy trong thread riêng
         await asyncio.to_thread(bot.send_message, chat_id=chat_id, text=message_text, parse_mode='HTML')
-    except Exception as e:
-        print(f"{RED}Lỗi khi gửi tin nhắn tới {chat_id}: {e}{RESET}")
-        # Thêm kiểm tra chi tiết lỗi để loại bỏ chat_id không hợp lệ
-        if "bot was blocked by the user" in str(e).lower() or "chat not found" in str(e).lower():
-            print(f"{YELLOW}Bot bị chặn/không tìm thấy chat cho {chat_id}. Đang loại bỏ khỏi active_chat_ids (nếu có).{RESET}")
+        logger.info(f"Đã gửi tin nhắn đến {chat_id}.")
+    except telebot.apihelper.ApiTelegramException as e:
+        logger.warning(f"Lỗi Telegram API khi gửi tin nhắn tới {chat_id}: {e}")
+        # Xử lý các lỗi phổ biến khi bot bị chặn/không tìm thấy chat
+        if "bot was blocked by the user" in str(e).lower() or \
+           "chat not found" in str(e).lower() or \
+           "user is deactivated" in str(e).lower():
+            logger.warning(f"Bot bị chặn/không tìm thấy chat cho {chat_id}. Đang loại bỏ khỏi active_chat_ids (nếu có).")
             # Tìm và loại bỏ chat_id này khỏi các user_data entries
-            for user_key, user_info in list(user_data.items()):
+            for user_key, user_info in list(user_data.items()): # Dùng list() để tránh lỗi khi sửa đổi dict
                 if user_info.get('current_chat_id') == chat_id:
                     user_info['current_chat_id'] = None # Đặt về None để người dùng phải kích hoạt lại
                     # Remove chat_id from assigned_chat_ids as well
                     user_info['assigned_chat_ids'] = [cid for cid in user_info['assigned_chat_ids'] if cid != chat_id]
                     save_user_data()
-                    print(f"{YELLOW}Đã cập nhật trạng thái cho key '{user_key}' (ID: {chat_id}).{RESET}")
+                    logger.warning(f"Đã cập nhật trạng thái cho key '{user_key}' (ID: {chat_id}).")
                     break
+    except Exception as e:
+        logger.error(f"Lỗi không xác định khi gửi tin nhắn tới {chat_id}: {e}")
 
 
 async def send_prediction_notification(phien_du_doan, predictions, final_choice):
@@ -429,12 +440,14 @@ async def send_result_notification(phien, xx, tong, kq_thucte, prediction_data):
 
 def is_admin_by_chat_id(chat_id):
     """Kiểm tra xem một chat_id có phải là admin không (dựa trên cấu hình ban đầu ADMIN_CHAT_ID)."""
-    return str(chat_id) == ADMIN_CHAT_ID # So sánh trực tiếp với ID admin cấu hình
+    # So sánh trực tiếp với ID admin cấu hình
+    return str(chat_id) == ADMIN_CHAT_ID
 
 def get_user_info_by_chat_id(chat_id):
     """Tìm thông tin key của người dùng dựa trên chat_id đang được gán."""
     for key, info in user_data.items():
-        if info.get('current_chat_id') == chat_id:
+        # Kiểm tra cả current_chat_id và assigned_chat_ids
+        if info.get('current_chat_id') == chat_id or (chat_id in info.get('assigned_chat_ids', [])):
             return key, info
     return None, None
 
@@ -453,6 +466,7 @@ def is_key_valid(user_info):
         expiry_dt = datetime.fromisoformat(user_info['expiry_time'])
         return datetime.now() < expiry_dt
     except (TypeError, ValueError):
+        logger.error(f"Lỗi định dạng thời gian hết hạn cho key: {user_info.get('key', 'N/A')}")
         return False # Lỗi định dạng thời gian
 
 async def authenticate_user_key(chat_id, user_key_input):
@@ -464,7 +478,7 @@ async def authenticate_user_key(chat_id, user_key_input):
 
     if user_key_input not in user_data:
         await send_telegram_message(chat_id, "❌ **Key không hợp lệ hoặc không tồn tại.** Vui lòng kiểm tra lại hoặc liên hệ Admin.")
-        print(f"{YELLOW}Chat ID {chat_id} nhập key không tồn tại: '{user_key_input}'.{RESET}")
+        logger.warning(f"Chat ID {chat_id} nhập key không tồn tại: '{user_key_input}'.")
         return False
 
     user_info = user_data[user_key_input]
@@ -472,34 +486,33 @@ async def authenticate_user_key(chat_id, user_key_input):
     # Nếu đây là key được cấp qua /capkey và chat_id không khớp
     if user_info.get('associated_chat_id') is not None and user_info['associated_chat_id'] != chat_id:
         await send_telegram_message(chat_id, "❌ **Key này chỉ được kích hoạt bởi ID Telegram đã được chỉ định.** Vui lòng liên hệ Admin.")
-        print(f"{YELLOW}Chat ID {chat_id} cố gắng dùng key '{user_key_input}' được gán cho ID khác.{RESET}")
+        logger.warning(f"Chat ID {chat_id} cố gắng dùng key '{user_key_input}' được gán cho ID khác.")
         return False
 
     if not is_key_valid(user_info):
         await send_telegram_message(chat_id, "❌ **Key này đã hết hạn.** Vui lòng liên hệ Admin để gia hạn.")
-        print(f"{YELLOW}Chat ID {chat_id} nhập key hết hạn: '{user_key_input}'.{RESET}")
+        logger.warning(f"Chat ID {chat_id} nhập key hết hạn: '{user_key_input}'.")
         return False
 
     max_devices = user_info.get('max_devices', 1)
-    # current_chat_id_for_key = user_info.get('current_chat_id') # Không cần dùng trực tiếp nữa
     assigned_chat_ids = set(user_info.get('assigned_chat_ids', []))
 
     if max_devices != -1 and chat_id not in assigned_chat_ids:
         if len(assigned_chat_ids) >= max_devices:
             await send_telegram_message(chat_id, f"⚠️ **Key '{user_key_input}' đã đạt số lượng thiết bị tối đa ({max_devices}).**\nVui lòng ngắt kết nối key khỏi thiết bị cũ hoặc liên hệ Admin.")
-            print(f"{YELLOW}Key '{user_key_input}' đã vượt quá giới hạn thiết bị cho Chat ID {chat_id}.{RESET}")
+            logger.warning(f"Key '{user_key_input}' đã vượt quá giới hạn thiết bị cho Chat ID {chat_id}.")
             return False
 
     # Nếu chat_id đã nằm trong danh sách assigned_chat_ids và là current_chat_id
     if chat_id in assigned_chat_ids and user_info.get('current_chat_id') == chat_id:
         await send_telegram_message(chat_id, f"✅ **Key '{user_key_input}' đã được kích hoạt trên thiết bị này.** Bot sẽ tiếp tục gửi dự đoán.")
-        print(f"{GREEN}Chat ID {chat_id} đã kích hoạt lại key '{user_key_input}'.{RESET}")
+        logger.info(f"Chat ID {chat_id} đã kích hoạt lại key '{user_key_input}'.")
         return True
 
     # Nếu key đang được dùng bởi chat_id khác và là single device (max_devices = 1)
     if max_devices == 1 and user_info.get('current_chat_id') and user_info['current_chat_id'] != chat_id:
         await send_telegram_message(user_info['current_chat_id'], f"⚠️ **Key của bạn ('{user_key_input}') đã được đăng nhập trên một thiết bị khác.**\nBạn sẽ không còn nhận được dự đoán trên thiết bị này.")
-        print(f"{YELLOW}Key '{user_key_input}' đã bị chuyển từ {user_info['current_chat_id']} sang {chat_id}.{RESET}")
+        logger.warning(f"Key '{user_key_input}' đã bị chuyển từ {user_info['current_chat_id']} sang {chat_id}.")
         # Xóa chat_id cũ khỏi assigned_chat_ids nếu nó chỉ cho phép 1 thiết bị
         if user_info['current_chat_id'] in assigned_chat_ids:
             assigned_chat_ids.discard(user_info['current_chat_id'])
@@ -519,14 +532,14 @@ async def authenticate_user_key(chat_id, user_key_input):
         elif member.user.first_name:
             user_info['username'] = member.user.first_name
     except Exception as e:
-        print(f"{YELLOW}Không thể lấy username cho chat_id {chat_id}: {e}{RESET}")
+        logger.warning(f"Không thể lấy username cho chat_id {chat_id}: {e}")
 
     # Cập nhật và lưu lại user_data
     user_data[user_key_input] = user_info
     save_user_data()
 
     await send_telegram_message(chat_id, f"✅ **Key '{user_key_input}' của bạn đã được kích hoạt thành công!**\nBot sẽ bắt đầu gửi dự đoán cho bạn.")
-    print(f"{GREEN}Chat ID {chat_id} đã kích hoạt key '{user_key_input}'.{RESET}")
+    logger.info(f"Chat ID {chat_id} đã kích hoạt key '{user_key_input}'.")
     return True
 
 # Admin commands
@@ -604,7 +617,7 @@ async def add_key_by_chat_id(admin_chat_id, target_chat_id_str, duration_hours=N
         await send_telegram_message(admin_chat_id, f"✅ Đã cập nhật key `{existing_key_for_chat_id}` cho ID `{target_chat_id}` (hiệu lực: {duration_hours} giờ)." + \
                                                     f"\n_Người dùng sẽ nhận thông báo dự đoán tự động._")
         await send_telegram_message(target_chat_id, f"🎉 Key của bạn đã được Admin kích hoạt/gia hạn!\nThời hạn: {duration_hours} giờ.\nBot sẽ bắt đầu gửi dự đoán cho bạn.")
-        print(f"{GREEN}Admin {admin_chat_id} đã cập nhật key '{existing_key_for_chat_id}' cho chat_id {target_chat_id}.{RESET}")
+        logger.info(f"Admin {admin_chat_id} đã cập nhật key '{existing_key_for_chat_id}' cho chat_id {target_chat_id}.")
         return True
     else:
         # Tạo key mới
@@ -632,7 +645,7 @@ async def add_key_by_chat_id(admin_chat_id, target_chat_id_str, duration_hours=N
         save_user_data()
         await send_telegram_message(admin_chat_id, f"✅ Đã cấp key `{key_name}` cho ID `{target_chat_id}` (hiệu lực: {duration_hours} giờ).\n_Người dùng sẽ nhận thông báo dự đoán tự động._")
         await send_telegram_message(target_chat_id, f"🎉 Key của bạn đã được Admin kích hoạt!\nThời hạn: {duration_hours} giờ.\nBot sẽ bắt đầu gửi dự đoán cho bạn.")
-        print(f"{GREEN}Admin {admin_chat_id} đã cấp key mới '{key_name}' cho chat_id {target_chat_id}.{RESET}")
+        logger.info(f"Admin {admin_chat_id} đã cấp key mới '{key_name}' cho chat_id {target_chat_id}.")
         return True
 
 async def remove_user_key(admin_chat_id, key_name):
@@ -650,7 +663,7 @@ async def remove_user_key(admin_chat_id, key_name):
             try:
                 await send_telegram_message(user_info['current_chat_id'], f"⚠️ **Key của bạn ('{key_name}') đã bị Admin xóa.** Bạn sẽ không còn nhận được dự đoán.")
             except Exception as e:
-                print(f"{YELLOW}Không thể gửi thông báo xóa key tới {user_info['current_chat_id']}: {e}{RESET}")
+                logger.warning(f"Không thể gửi thông báo xóa key tới {user_info['current_chat_id']}: {e}")
 
         del user_data[key_name_lower]
         save_user_data()
@@ -669,7 +682,7 @@ def check_expired_keys():
         if user_info['role'] not in ['admin', 'ctv'] and not is_key_valid(user_info):
             keys_to_remove.append(user_key)
             expired_count += 1
-            print(f"{YELLOW}Key '{user_key}' của người dùng {user_info.get('username', 'N/A')} (ID: {user_info.get('current_chat_id', 'N/A')}) đã hết hạn.{RESET}")
+            logger.info(f"Key '{user_key}' của người dùng {user_info.get('username', 'N/A')} (ID: {user_info.get('current_chat_id', 'N/A')}) đã hết hạn.")
             if user_info.get('current_chat_id'):
                 # Chạy coroutine trong event loop hiện tại
                 asyncio.run_coroutine_threadsafe(
@@ -682,7 +695,7 @@ def check_expired_keys():
 
     if expired_count > 0:
         save_user_data()
-        print(f"{YELLOW}Đã xóa {expired_count} key hết hạn.{RESET}")
+        logger.warning(f"Đã xóa {expired_count} key hết hạn.")
 
 # ==== VÒNG LẶP CHÍNH CỦA BOT ====
 async def main_bot_loop():
@@ -693,13 +706,13 @@ async def main_bot_loop():
     # Chỉ chạy vòng lặp chính nếu có ít nhất 1 key hợp lệ đang được sử dụng
     has_active_valid_keys = any(is_key_valid(info) and info.get('current_chat_id') for info in user_data.values())
     if not has_active_valid_keys:
-        print(f"{YELLOW}Không có key hợp lệ đang hoạt động, bot tạm dừng kiểm tra phiên mới.{RESET}")
-        # Đảm bảo vòng lặp không bị chặn hoàn toàn
-        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+        logger.info(f"Không có key hợp lệ đang hoạt động, bot tạm dừng kiểm tra phiên mới.")
+        await asyncio.sleep(CHECK_INTERVAL_SECONDS) # Chờ trước khi thử lại
         return
 
     data = get_data_from_api()
     if not data:
+        logger.warning("Không lấy được dữ liệu từ API hoặc dữ liệu trống. Đang chờ...")
         await asyncio.sleep(CHECK_INTERVAL_SECONDS) # Chờ trước khi thử lại
         return
 
@@ -709,19 +722,19 @@ async def main_bot_loop():
     lich_su_cau_api = data.get("lich_su_cau_api")
 
     if phien_hien_tai_api is None or not xuc_xac_api:
-        print(f"{YELLOW}Dữ liệu API chưa đầy đủ cho phiên hiện tại.{RESET}")
+        logger.warning(f"Dữ liệu API chưa đầy đủ cho phiên hiện tại. Phien: {phien_hien_tai_api}, XX: {xuc_xac_api}")
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
         return
 
     if last_processed_phien is None:
-        print(f"{GREEN}Lần chạy đầu tiên: Đang khởi tạo lịch sử bot và dự đoán phiên kế tiếp.{RESET}")
+        logger.info(f"Lần chạy đầu tiên: Đang khởi tạo lịch sử bot và dự đoán phiên kế tiếp.")
 
         if lich_su_cau_api:
             lich_su = list(lich_su_cau_api[-MAX_PATTERN_LENGTH:])
             cap_nhat_lich_su_file()
-            print(f"{GREEN}Khởi tạo lịch sử bot từ API: {''.join(lich_su)}{RESET}")
+            logger.info(f"Khởi tạo lịch sử bot từ API: {''.join(lich_su)}")
         else:
-            print(f"{YELLOW}Không có lịch sử cầu từ API để khởi tạo. Bắt đầu với lịch sử trống.{RESET}")
+            logger.warning(f"Không có lịch sử cầu từ API để khởi tạo. Bắt đầu với lịch sử trống.")
             lich_su = []
 
         last_processed_phien = phien_hien_tai_api
@@ -740,22 +753,20 @@ async def main_bot_loop():
         }
         log_prediction_data(phien_tiep_theo, current_history_str_for_prediction, all_predictions, final_choice)
 
-        print(f"{BOLD}Đã khởi tạo bot. Dự đoán phiên #{phien_tiep_theo}.{RESET}")
-        print(f"Lịch sử cầu bot: {''.join(lich_su)}")
-        os.system('cls' if os.name == 'nt' else 'clear') # Xóa màn hình console
+        logger.info(f"Đã khởi tạo bot. Dự đoán phiên #{phien_tiep_theo}. Lịch sử cầu bot: {''.join(lich_su)}")
         return
 
     if phien_hien_tai_api > last_processed_phien:
         phien_expected_result = last_processed_phien + 1
 
         if phien_hien_tai_api != phien_expected_result:
-            print(f"{YELLOW}Cảnh báo: Phát hiện phiên nhảy cóc từ {last_processed_phien} lên {phien_hien_tai_api}.{RESET}")
+            logger.warning(f"Cảnh báo: Phát hiện phiên nhảy cóc từ {last_processed_phien} lên {phien_hien_tai_api}.")
 
             # Xử lý các phiên bị bỏ lỡ
             for missed_phien in range(phien_expected_result, phien_hien_tai_api):
                 if missed_phien in pending_predictions:
                     pending_predictions.pop(missed_phien, None)
-                    print(f"{YELLOW}Đã xóa dự đoán chờ xử lý cho phiên {missed_phien} (phiên bị bỏ lỡ).{RESET}")
+                    logger.warning(f"Đã xóa dự đoán chờ xử lý cho phiên {missed_phien} (phiên bị bỏ lỡ).")
 
             # Cập nhật lịch sử với kết quả phiên hiện tại API
             lich_su.append(kq_thuc_te_api)
@@ -764,7 +775,7 @@ async def main_bot_loop():
 
             last_processed_phien = phien_hien_tai_api
             simulate_md5_analysis()
-            print(f"{YELLOW}Đã cập nhật lịch sử bot đến phiên {phien_hien_tai_api} do nhảy cóc.{RESET}")
+            logger.info(f"Đã cập nhật lịch sử bot đến phiên {phien_hien_tai_api} do nhảy cóc.")
 
         else: # Phiên liên tiếp, xử lý như bình thường
             if phien_expected_result in pending_predictions:
@@ -785,10 +796,9 @@ async def main_bot_loop():
                 simulate_md5_analysis()
                 last_processed_phien = phien_hien_tai_api
 
-                print(f"{BOLD}Đã xử lý kết quả phiên #{phien_expected_result}.{RESET}")
-                print(f"Lịch sử cầu bot: {''.join(lich_su)}")
+                logger.info(f"Đã xử lý kết quả phiên #{phien_expected_result}. Lịch sử cầu bot: {''.join(lich_su)}")
             else:
-                print(f"{YELLOW}Cảnh báo: Không tìm thấy dự đoán cho phiên {phien_expected_result} trong pending_predictions. Chỉ cập nhật lịch sử.{RESET}")
+                logger.warning(f"Cảnh báo: Không tìm thấy dự đoán cho phiên {phien_expected_result} trong pending_predictions. Chỉ cập nhật lịch sử.")
                 lich_su.append(kq_thuc_te_api)
                 lich_su = lich_su[-MAX_PATTERN_LENGTH:]
                 cap_nhat_lich_su_file()
@@ -811,10 +821,7 @@ async def main_bot_loop():
         }
         log_prediction_data(phien_tiep_theo, current_history_str_for_prediction, all_predictions, final_choice)
 
-        os.system('cls' if os.name == 'nt' else 'clear') # Xóa màn hình console
-        print(f"{BOLD}Đã xử lý kết quả phiên #{phien_hien_tai_api}, dự đoán cho phiên #{phien_tiep_theo}.{RESET}")
-        print(f"Lịch sử cầu bot: {''.join(lich_su)}")
-        print(f"Dự đoán chờ xử lý: {list(pending_predictions.keys())}")
+        logger.info(f"Đã xử lý kết quả phiên #{phien_hien_tai_api}, dự đoán cho phiên #{phien_tiep_theo}. Lịch sử cầu bot: {''.join(lich_su)}. Dự đoán chờ xử lý: {list(pending_predictions.keys())}")
 
 
 def simulate_md5_analysis():
@@ -837,10 +844,10 @@ async def start_command_handler(message):
     _key, info = get_user_info_by_chat_id(chat_id)
     if info and info.get('associated_chat_id') == chat_id and is_key_valid(info):
         await send_telegram_message(chat_id, "✅ **Chào mừng bạn quay lại!**\nKey của bạn đã được kích hoạt. Bot sẽ tiếp tục gửi dự đoán.")
-        print(f"{GREEN}Người dùng {chat_id} (key: {_key}) đã bấm /start và key đã được kích hoạt tự động.{RESET}")
+        logger.info(f"Người dùng {chat_id} (key: {_key}) đã bấm /start và key đã được kích hoạt tự động.")
     else:
         await send_telegram_message(chat_id, "🤖 **Chào mừng bạn đến với Tool TX Pro AI!**\nĐể sử dụng bot, vui lòng nhập key của bạn theo cú pháp: `/key [tên_key_của_bạn]`\n\nNếu bạn là Admin hoặc CTV của Quangdz, hãy nhập key mặc định của bạn (ví dụ: `/key quangdz`).")
-        print(f"{GREEN}Người dùng mới {chat_id} đã bấm /start. Đang chờ key.{RESET}")
+        logger.info(f"Người dùng mới {chat_id} đã bấm /start. Đang chờ key.")
 
 
 @bot.message_handler(commands=['key'])
@@ -874,7 +881,7 @@ async def help_command_handler(message):
     Nếu bạn là Admin, vui lòng sử dụng lệnh `/adminhelp` để xem các lệnh quản lý.
     """
     await send_telegram_message(chat_id, help_message)
-    print(f"{GREEN}Người dùng {chat_id} đã yêu cầu lệnh /help.{RESET}")
+    logger.info(f"Người dùng {chat_id} đã yêu cầu lệnh /help.")
 
 
 @bot.message_handler(func=lambda message: True) # Xử lý tất cả các tin nhắn văn bản còn lại (phải đặt cuối cùng)
@@ -917,7 +924,7 @@ async def handle_text_messages(message):
                 expiry_display = f"{duration_hours} giờ" if duration_hours is not None else "Vĩnh viễn"
                 devices_display = f"{max_devices} thiết bị" if max_devices != -1 else "Đa thiết bị"
                 await send_telegram_message(chat_id, f"✅ Đã tạo/cập nhật key '{key_name}' có hiệu lực trong {expiry_display} cho {devices_display}.")
-                print(f"{GREEN}Admin {chat_id} đã cấp key '{key_name}' cho {expiry_display}, {devices_display}.{RESET}")
+                logger.info(f"Admin {chat_id} đã cấp key '{key_name}' cho {expiry_display}, {devices_display}.")
             else:
                 await send_telegram_message(chat_id, f"❌ Không thể tạo/cập nhật key '{key_name}'.")
             return
@@ -926,7 +933,7 @@ async def handle_text_messages(message):
             key_name = parts[1]
             if await add_update_key(chat_id, key_name, duration_hours=None, role="ctv", max_devices=-1):
                 await send_telegram_message(chat_id, f"✅ Đã cấp quyền CTV vĩnh viễn cho key '{key_name}'.")
-                print(f"{GREEN}Admin {chat_id} đã cấp quyền CTV cho '{key_name}'.{RESET}")
+                logger.info(f"Admin {chat_id} đã cấp quyền CTV cho '{key_name}'.")
             else:
                 await send_telegram_message(chat_id, f"❌ Không thể cấp quyền CTV cho '{key_name}'.")
             return
@@ -935,7 +942,7 @@ async def handle_text_messages(message):
             key_name_to_delete = parts[1]
             if await remove_user_key(chat_id, key_name_to_delete):
                 await send_telegram_message(chat_id, f"✅ Đã xóa key '{key_name_to_delete}' khỏi hệ thống.")
-                print(f"{GREEN}Admin {chat_id} đã xóa key '{key_name_to_delete}'.{RESET}")
+                logger.info(f"Admin {chat_id} đã xóa key '{key_name_to_delete}'.")
             else:
                 await send_telegram_message(chat_id, f"❌ Không tìm thấy key '{key_name_to_delete}' hoặc không thể xóa.")
             return
@@ -955,7 +962,7 @@ async def handle_text_messages(message):
 
                     key_list_message.append(f"• <b>Key: {info['key']}</b> - Username: {info.get('username', 'N/A')}\n  Vai trò: {info['role'].upper()}, Hạn: {expiry}, TB: {devices_limit}\n  Trạng thái: {status}, {current_dev} {associated_id}")
             await send_telegram_message(chat_id, "\n".join(key_list_message))
-            print(f"{GREEN}Admin {chat_id} đã yêu cầu danh sách key.{RESET}")
+            logger.info(f"Admin {chat_id} đã yêu cầu danh sách key.")
             return
 
         elif command == '/capkey' and len(parts) >= 3:
@@ -1019,7 +1026,7 @@ async def handle_text_messages(message):
         # Nếu chưa đăng nhập hoặc key hết hạn
         await send_telegram_message(chat_id, "🤖 **Chào mừng bạn đến với Tool TX Pro AI!**\nĐể sử dụng bot, vui lòng nhập key của bạn theo cú pháp: `/key [tên_key_của_bạn]`\nSử dụng `/help` để xem các lệnh hỗ trợ.")
 
-    print(f"{YELLOW}Chat ID {chat_id} gửi tin nhắn không phải lệnh: '{text}'.{RESET}")
+    logger.info(f"Chat ID {chat_id} gửi tin nhắn không phải lệnh: '{text}'.")
 
 
 # ==== FLASK SERVER ĐỂ GIỮ DỊCH VỤ LUÔN CHẠY TRÊN RENDER (NẾU DÙNG WEB SERVICE) ====
@@ -1028,7 +1035,6 @@ app = Flask(__name__)
 @app.route('/')
 def hello_world():
     status_msg = "Bot is running"
-    # The 'bot' object is now initialized globally, so no need to check 'if not bot:'
     if not any(is_key_valid(info) and info.get('current_chat_id') for info in user_data.values()):
         status_msg += ", No active valid keys"
 
@@ -1036,72 +1042,67 @@ def hello_world():
 
 def run_flask_app():
     port = int(os.environ.get("PORT", 10000))
-    print(f"{YELLOW}Bắt đầu Flask server trên cổng {port} để giữ dịch vụ luôn chạy...{RESET}")
-    app.run(host='0.0.0.0', port=port, debug=False)
-
+    logger.info(f"Bắt đầu Flask server trên cổng {port} để giữ dịch vụ luôn chạy...")
+    # Flask sẽ blocking ở đây, nên chạy nó trong một thread riêng
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False) # use_reloader=False để tránh chạy 2 lần
 
 async def run_main_loop_periodically():
     while True:
         try:
             await main_bot_loop()
         except Exception as e:
-            print(f"{RED}Lỗi trong vòng lặp chính: {e}{RESET}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Lỗi trong vòng lặp chính: {e}", exc_info=True)
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
 async def main():
-    global bot # Keep global bot reference
+    global bot # Sử dụng biến global bot
 
-    # === START DEBUG: GÁN TOKEN TRỰC TIẾP VÀO CODE ===
-    # LƯU Ý QUAN TRỌNG:
-    # 1. KHÔNG NÊN LÀM ĐIỀU NÀY TRONG MÔI TRƯỜNG SẢN PHẨM HOẶC KHI ĐẨY CODE LÊN GITHUB CÔNG KHAI!
-    # 2. HÃY HOÀN TÁC (REVERT) LẠI SAU KHI ĐÃ DEBUG XONG VÀ BOT CHẠY ĐƯỢC.
-    # TOKEN của bạn là: 8080593458:AAFfIN0hVbZBflDCFAb-pJ51cysDoWRcsZU
-    # Tôi đã di chuyển dòng gán token này lên trên, ngay khi khởi tạo bot.
-    # Dòng này bây giờ không cần thiết nữa.
-    # bot.token = "7912572586:AAEcZZmzXVjVNM5YO8TbHx1REd1i4gqGqCM"
-    print(f"{YELLOW}CẢNH BÁO: Token được gán trực tiếp tại dòng khởi tạo bot. Vui lòng cân nhắc sử dụng biến môi trường!{RESET}")
+    # === CẤU HÌNH TOKEN BOT ===
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not TELEGRAM_BOT_TOKEN:
+        logger.critical("LỖI: Biến môi trường TELEGRAM_BOT_TOKEN chưa được đặt. Bot sẽ không chạy.")
+        # Fallback to hardcoded token for local testing/debug IF NO ENV VAR
+        # Bạn nên COMMENT DÒNG GÁN TRỰC TIẾP NÀY KHI TRIỂN KHAI THẬT
+        TELEGRAM_BOT_TOKEN = "8080593458:AAFfIN0hVbZBflDCFAb-pJ51cysDoWRcsZU"
+        logger.warning(f"Sử dụng token được gán cứng cho mục đích debug. Vui lòng đặt biến môi trường TELEGRAM_BOT_TOKEN.")
+        if not TELEGRAM_BOT_TOKEN: # If hardcoded token is also missing/commented
+             logger.critical("Không có token bot nào được cung cấp. Đang thoát.")
+             return
 
-    # Các dòng lấy token từ biến môi trường sẽ bị bỏ qua (hoặc comment lại)
-    # TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    # if not TELEGRAM_BOT_TOKEN:
-    #     print(f"{RED}{BOLD}LỖI: Biến môi trường TELEGRAM_BOT_TOKEN chưa được đặt.{RESET}")
-    #     return
-    # bot.token = TELEGRAM_BOT_TOKEN
-    # === END DEBUG ===
-
+    bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, parse_mode='HTML')
+    # === KẾT THÚC CẤU HÌNH TOKEN BOT ===
 
     load_data() # Tải dữ liệu ban đầu (bao gồm user_data và khởi tạo key admin mặc định)
-    print(f"{BOLD}{GREEN}=== TOOL TX PRO AI V3 (CHỦ ĐỘNG) ===")
-    print(f"Bot đã sẵn sàng.{RESET}")
+    logger.info("=== TOOL TX PRO AI V3 (CHỦ ĐỘNG) ===")
+    logger.info("Bot đã sẵn sàng.")
 
     # Khởi chạy Flask server trong một thread riêng
     flask_thread = threading.Thread(target=run_flask_app)
-    flask_thread.daemon = True
+    flask_thread.daemon = True # Daemon thread sẽ tự động kết thúc khi main program kết thúc
     flask_thread.start()
+    logger.info("Flask server thread đã khởi chạy.")
 
     # Bắt đầu vòng lặp chính để kiểm tra API và xử lý phiên
     asyncio.create_task(run_main_loop_periodically())
+    logger.info("Vòng lặp bot chính đã được lên lịch.")
 
-    print(f"{YELLOW}Bắt đầu polling Telegram...{RESET}")
+    logger.info("Bắt đầu polling Telegram...")
     try:
         # Sử dụng polling của pyTelegramBotAPI để nhận tin nhắn
         # Đảm bảo none_stop=True để bot tiếp tục chạy ngay cả khi có lỗi nhỏ
         # timeout được đặt để tránh block quá lâu nếu không có cập nhật
-        await asyncio.to_thread(bot.polling, none_stop=True, interval=0, timeout=20)
+        # Long polling giúp bot phản hồi nhanh hơn
+        await asyncio.to_thread(bot.infinity_polling, none_stop=True, interval=0, timeout=60)
     except Exception as e:
-        print(f"{RED}Lỗi trong polling bot Telegram: {e}{RESET}")
-        import traceback
-        traceback.print_exc()
+        logger.critical(f"Lỗi nghiêm trọng trong polling bot Telegram: {e}", exc_info=True)
 
 if __name__ == "__main__":
     try:
-        os.system('cls' if os.name == 'nt' else 'clear') # Xóa màn hình console khi khởi động
+        # Nếu chạy trên Render, các lệnh os.system('cls') sẽ không cần thiết
+        # và có thể gây lỗi. Đã loại bỏ.
         asyncio.run(main())
     except KeyboardInterrupt:
-        print(f"\n{RED}{BOLD}Đã dừng bot do người dùng ngắt (Ctrl+C).{RESET}")
+        logger.info("Đã dừng bot do người dùng ngắt (Ctrl+C).")
     except Exception as e:
-        print(f"\n{RED}{BOLD}Lỗi nghiêm trọng khi khởi động bot: {e}{RESET}")
-        import traceback
-        traceback.print_exc()
+        logger.critical(f"Lỗi nghiêm trọng khi khởi động bot: {e}", exc_info=True)
+
