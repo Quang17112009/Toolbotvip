@@ -19,10 +19,11 @@ logger = logging.getLogger(__name__)
 # Để thử nghiệm cục bộ, bạn có thể gán token cứng ở đây.
 # KHI TRIỂN KHAI LÊN SERVER NHƯ RENDER, HÃY BỎ COMMENT DÒNG os.getenv() BÊN DƯỚI
 # VÀ COMMENT DÒNG GÁN TRỰC TIẾP TOKEN.
-TELEGRAM_BOT_TOKEN_HARDCODED = "8080593458:AAFfIN0hVbZBflDCFAb-pJ51cysDoWRcsZU" # <--- THAY THẾ BẰNG TOKEN BOT CỦA BẠN
+# ===== TOKEN MỚI ĐÃ ĐƯỢC CẬP NHẬT =====
+TELEGRAM_BOT_TOKEN_HARDCODED = "8080593458:AAFjVM7hVLrv9AzV6WUU5ttpXc1vMRrEtSk" 
 
-# Khởi tạo bot ngay lập tức
-bot = telebot.TeleBot("8080593458:AAFfIN0hVbZBflDCFAb-pJ51cysDoWRcsZU", parse_mode='HTML')
+# Khởi tạo bot ngay lập tức với token mới
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN_HARDCODED, parse_mode='HTML')
 
 
 # API URL MỚI
@@ -44,8 +45,8 @@ AI_LEARN_THRESHOLD_COUNT = 5
 AI_LEARN_THRESHOLD_RATE = 75
 
 # --- Cấu hình quyền hạn ---
-# THAY THẾ BẰNG CHAT_ID CỦA ADMIN MẶC ĐỊNH (là ID của bạn)
-ADMIN_CHAT_ID = "6915752059" # <-- VUI LÒNG THAY THẾ BẰNG ID TELEGRAM CỦA BẠN
+# ===== ADMIN CHAT ID CỦA BẠN ĐÃ ĐƯỢC GIỮ NGUYÊN =====
+ADMIN_CHAT_ID = "6915752059"
 DEFAULT_ADMIN_KEY = "quangdz" # Key admin mặc định khi admin đăng nhập lần đầu
 
 # --- MÀU SẮC CHO CONSOLE (chỉ dùng cho console, không hiển thị trong logs Render) ---
@@ -820,7 +821,7 @@ async def main_bot_loop():
         await send_prediction_notification(phien_tiep_theo, all_predictions, final_choice)
 
         pending_predictions[phien_tiep_theo] = {
-            "history_str": current_history_str_for_history_str,
+            "history_str": current_history_str_for_prediction,
             "all_predictions": all_predictions,
             "final_choice": final_choice
         }
