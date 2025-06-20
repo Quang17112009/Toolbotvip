@@ -5,15 +5,13 @@ import json
 import os
 import random
 import string
-# import hashlib # Đã bỏ thư viện hashlib
 from datetime import datetime, timedelta
 from threading import Thread, Event, Lock
-
 from flask import Flask, request
 
 # --- Cấu hình Bot (ĐẶT TRỰC TIẾP TẠY ĐÂY) ---
 # THAY THẾ 'YOUR_BOT_TOKEN_HERE' BẰNG TOKEN THẬT CỦA BẠN
-BOT_TOKEN = "7658240012:AAFAZSC7ONQ1KRGNtskAUr-Pepuv4n7KjvE" 
+BOT_TOKEN = "7820739987:AAE_eU2JPZH7u6KnDRq31_l4tn64AD_8f6s" 
 # THAY THẾ BẰNG ID ADMIN THẬT CỦA BẠN. Có thể có nhiều ID, cách nhau bởi dấu phẩy.
 ADMIN_IDS = [6915752059] # Ví dụ: [6915752059, 123456789]
 
@@ -21,8 +19,30 @@ DATA_FILE = 'user_data.json'
 CAU_PATTERNS_FILE = 'cau_patterns.json'
 CODES_FILE = 'codes.json'
 
-# --- Cấu hình nâng cao ---
-TX_HISTORY_LENGTH = 7 # Chiều dài lịch sử cầu để học mẫu
+# Cấu hình cho nhiều game
+GAME_CONFIGS = {
+    "luckywin": { 
+        "api_url": "https://1.bot/GetNewLottery/LT_Taixiu",
+        "name": "Luckywin",
+        "pattern_prefix": "L", 
+        "tx_history_length": 7, # Chiều dài lịch sử cầu để học mẫu
+        "refresh_interval": 10 # Khoảng thời gian (giây) giữa các lần kiểm tra API của game này
+    },
+    "hitclub": {
+        "api_url": "https://apihitclub.up.railway.app/api/taixiu", # Giữ nguyên API này cho Hit Club
+        "name": "Hit Club",
+        "pattern_prefix": "H", 
+        "tx_history_length": 7,
+        "refresh_interval": 10 # Khoảng thời gian (giây) giữa các lần kiểm tra API của game này
+    },
+    "sunwin": { # THÊM GAME SUNWIN
+        "api_url": "https://wanglinapiws.up.railway.app/api/taixiu", # API của Sunwin
+        "name": "Sunwin",
+        "pattern_prefix": "S", 
+        "tx_history_length": 7,
+        "refresh_interval": 10
+    }
+}
 
 # --- Khởi tạo Flask App và Telegram Bot ---
 app = Flask(__name__)
@@ -32,16 +52,23 @@ bot = telebot.TeleBot(BOT_TOKEN)
 bot_enabled = True
 bot_disable_reason = "Không có"
 bot_disable_admin_id = None
-prediction_stop_event = Event() # Để kiểm soát luồng dự đoán
-bot_initialized = False # Cờ để đảm bảo bot chỉ được khởi tạo một lần
-bot_init_lock = Lock() # Khóa để tránh race condition khi khởi tạo
+prediction_stop_event = Event() 
+bot_initialized = False 
+bot_init_lock = Lock() 
 
 # Global data structures
 user_data = {}
-# Thay thế CAU_XAU/CAU_DEP bằng CAU_PATTERNS với confidence score
-CAU_PATTERNS = {} # {pattern_string: confidence_score (float)}
+CAU_PATTERNS = {} # {game_name: {pattern_string: confidence_score (float)}}
 GENERATED_CODES = {} # {code: {"value": 1, "type": "day", "used_by": null, "used_time": null}}
-# md5_results_history = [] # Đã bỏ biến này
+
+# Quản lý trạng thái riêng biệt cho mỗi game (last_id, tx_history, last_checked_time)
+game_states = {}
+for game_id in GAME_CONFIGS.keys():
+    game_states[game_id] = {
+        "last_id": None,
+        "tx_history": [],
+        "last_checked_time": 0 # Thời điểm cuối cùng kiểm tra API của game này
+    }
 
 # --- Quản lý dữ liệu người dùng, mẫu cầu và code ---
 def load_user_data():
@@ -50,6 +77,9 @@ def load_user_data():
         with open(DATA_FILE, 'r') as f:
             try:
                 user_data = json.load(f)
+                # Đảm bảo trường is_paused_prediction tồn tại cho các user cũ
+                for user_id_str, user_info in user_data.items():
+                    user_info.setdefault('is_paused_prediction', False)
             except json.JSONDecodeError:
                 print(f"Lỗi đọc {DATA_FILE}. Khởi tạo lại dữ liệu người dùng.")
                 user_data = {}
@@ -72,7 +102,13 @@ def load_cau_patterns():
                 CAU_PATTERNS = {}
     else:
         CAU_PATTERNS = {}
-    print(f"Loaded {len(CAU_PATTERNS)} patterns.")
+    
+    # Đảm bảo mỗi game có một entry trong CAU_PATTERNS
+    for game_id in GAME_CONFIGS.keys():
+        if game_id not in CAU_PATTERNS:
+            CAU_PATTERNS[game_id] = {}
+
+    print(f"Loaded patterns for {len(CAU_PATTERNS)} games.")
 
 def save_cau_patterns():
     with open(CAU_PATTERNS_FILE, 'w') as f:
@@ -117,8 +153,7 @@ def check_subscription(user_id):
         days = remaining_time.days
         hours = remaining_time.seconds // 3600
         minutes = (remaining_time.seconds % 3600) // 60
-        seconds = remaining_time.seconds % 60
-        return True, f"✅ Tài khoản của bạn còn hạn đến: `{expiry_date_str}` ({days} ngày {hours} giờ {minutes} phút {seconds} giây)."
+        return True, f"✅ Tài khoản của bạn còn hạn đến: `{expiry_date_str}` ({days} ngày {hours} giờ {minutes} phút)."
     else:
         return False, "❌ Tài khoản của bạn đã hết hạn."
 
@@ -129,19 +164,16 @@ def du_doan_theo_xi_ngau(dice_list):
     d1, d2, d3 = dice_list[-1]
     total = d1 + d2 + d3
 
-    # Một phương pháp dự đoán đơn giản dựa trên tổng và từng con xúc xắc
-    # Có thể phức tạp hơn với các quy tắc khác
     results = []
     for d in [d1, d2, d3]:
         tmp = d + total
-        while tmp > 6: # Đảm bảo nằm trong phạm vi 1-6
+        while tmp > 6: 
             tmp -= 6
         if tmp % 2 == 0:
             results.append("Tài")
         else:
             results.append("Xỉu")
 
-    # Chọn kết quả xuất hiện nhiều nhất, nếu hòa thì ưu tiên Tài
     tai_count = results.count("Tài")
     xiu_count = results.count("Xỉu")
     if tai_count >= xiu_count:
@@ -152,33 +184,31 @@ def du_doan_theo_xi_ngau(dice_list):
 
 def tinh_tai_xiu(dice):
     total = sum(dice)
-    return "Tài" if total >= 11 else "Xỉu", total
+    if total >= 11:
+        return "Tài", total
+    else:
+        return "Xỉu", total
 
 # --- Cập nhật mẫu cầu động và độ tin cậy ---
-def update_cau_patterns(pattern_str, prediction_correct):
+def update_cau_patterns(game_id, pattern_str, prediction_correct):
     global CAU_PATTERNS
-    # Tăng/giảm confidence score. Giả sử 1.0 là điểm khởi đầu, min 0.1, max 5.0
     initial_confidence = 1.0
     increase_factor = 0.2
-    decrease_factor = 0.5 # Giảm nhiều hơn khi sai để nhanh chóng loại bỏ mẫu xấu
+    decrease_factor = 0.5 
 
-    current_confidence = CAU_PATTERNS.get(pattern_str, initial_confidence)
+    current_confidence = CAU_PATTERNS[game_id].get(pattern_str, initial_confidence)
 
     if prediction_correct:
         new_confidence = min(current_confidence + increase_factor, 5.0)
     else:
         new_confidence = max(current_confidence - decrease_factor, 0.1)
     
-    CAU_PATTERNS[pattern_str] = new_confidence
+    CAU_PATTERNS[game_id][pattern_str] = new_confidence
     save_cau_patterns()
-    # print(f"Cập nhật mẫu cầu '{pattern_str}': Confidence mới = {new_confidence:.2f}")
+    # print(f"DEBUG: Cập nhật mẫu cầu '{pattern_str}' cho {game_id}: Confidence mới = {new_confidence:.2f}")
 
-def get_pattern_prediction_adjustment(pattern_str):
-    """
-    Trả về yếu tố điều chỉnh dự đoán dựa trên confidence score của mẫu cầu.
-    Nếu confidence cao (> ngưỡng), có thể tin tưởng. Nếu thấp (< ngưỡng), có thể đảo chiều.
-    """
-    confidence = CAU_PATTERNS.get(pattern_str, 1.0)
+def get_pattern_prediction_adjustment(game_id, pattern_str):
+    confidence = CAU_PATTERNS[game_id].get(pattern_str, 1.0)
     
     if confidence >= 2.5: # Ngưỡng để coi là cầu đẹp đáng tin
         return "giữ nguyên"
@@ -188,130 +218,200 @@ def get_pattern_prediction_adjustment(pattern_str):
         return "theo xí ngầu" # Không đủ độ tin cậy để điều chỉnh
 
 # --- Lấy dữ liệu từ API ---
-def lay_du_lieu():
+def lay_du_lieu(game_id):
+    config = GAME_CONFIGS.get(game_id)
+    if not config:
+        print(f"Lỗi: Cấu hình game '{game_id}' không tồn tại.")
+        return None
+
+    api_url = config["api_url"]
     try:
-        response = requests.get("https://1.bot/GetNewLottery/LT_Taixiu")
-        response.raise_for_status() # Báo lỗi nếu status code là lỗi HTTP
+        response = requests.get(api_url)
+        response.raise_for_status() 
         data = response.json()
-        if data.get("state") != 1:
-            # print(f"API trả về state không thành công: {data.get('state')}")
+        
+        print(f"DEBUG: Data fetched from {game_id} API: {data}") # DEBUG: In dữ liệu thô
+
+        if game_id == "luckywin":
+            if data.get("state") != 1:
+                print(f"DEBUG: Luckywin API state is not 1: {data}")
+                return None
+            return {
+                "ID": data.get("data", {}).get("ID"),
+                "Expect": data.get("data", {}).get("Expect"),
+                "OpenCode": data.get("data", {}).get("OpenCode")
+            }
+        elif game_id == "hitclub" or game_id == "sunwin": # Áp dụng chung logic cho Hit Club và Sunwin
+            # Dựa trên JSON bạn cung cấp: {"Ket_qua":"Tài","Phien":2611950,"Tong":14,"Xuc_xac_1":5,"Xuc_xac_2":4,"Xuc_xac_3":5,"id":"djtuancon"}
+            if not all(k in data for k in ["Phien", "Xuc_xac_1", "Xuc_xac_2", "Xuc_xac_3"]): 
+                 print(f"DEBUG: Dữ liệu {config['name']} không đầy đủ: {data}")
+                 return None
+            
+            xuc_xac_1 = data.get("Xuc_xac_1")
+            xuc_xac_2 = data.get("Xuc_xac_2")
+            xuc_xac_3 = data.get("Xuc_xac_3")
+
+            # Đảm bảo các giá trị xúc xắc là số nguyên và không null
+            if not all(isinstance(x, int) for x in [xuc_xac_1, xuc_xac_2, xuc_xac_3]):
+                print(f"DEBUG: Xúc xắc {config['name']} không phải số nguyên: {xuc_xac_1},{xuc_xac_2},{xuc_xac_3}")
+                return None
+
+            return {
+                "ID": data.get("Phien"), 
+                "Expect": data.get("Phien"),
+                "Xuc_xac_1": xuc_xac_1, # Giữ lại để debug nếu cần
+                "Xuc_xac_2": xuc_xac_2, # Giữ lại để debug nếu cần
+                "Xuc_xac_3": xuc_xac_3, # Giữ lại để debug nếu cần
+                "OpenCode": f"{xuc_xac_1},{xuc_xac_2},{xuc_xac_3}"
+            }
+        else:
+            print(f"Lỗi: Game '{game_id}' không được hỗ trợ trong hàm lay_du_lieu.")
             return None
-        return data.get("data")
+
     except requests.exceptions.RequestException as e:
-        print(f"Lỗi khi lấy dữ liệu từ API: {e}")
+        print(f"Lỗi khi lấy dữ liệu từ API {api_url} cho {game_id}: {e}")
         return None
     except json.JSONDecodeError:
-        print("Lỗi giải mã JSON từ API. Phản hồi không phải JSON hợp lệ.")
+        print(f"Lỗi giải mã JSON từ API {api_url} cho {game_id}. Phản hồi không phải JSON hợp lệ.")
+        return None
+    except Exception as e:
+        print(f"Lỗi không xác định trong lay_du_lieu cho {game_id}: {e}")
         return None
 
 
 # --- Logic chính của Bot dự đoán (chạy trong luồng riêng) ---
 def prediction_loop(stop_event: Event):
-    last_id = None
-    tx_history = []
-    
     print("Prediction loop started.")
     while not stop_event.is_set():
         if not bot_enabled:
-            # print(f"Bot dự đoán đang tạm dừng. Lý do: {bot_disable_reason}")
-            time.sleep(10) # Ngủ lâu hơn khi bot bị tắt
+            time.sleep(10) 
             continue
 
-        data = lay_du_lieu()
-        if not data:
-            # print("❌ Không lấy được dữ liệu từ API hoặc dữ liệu không hợp lệ.")
-            time.sleep(5)
-            continue
+        for game_id, config in GAME_CONFIGS.items():
+            current_game_state = game_states[game_id]
+            current_time = time.time()
 
-        issue_id = data.get("ID")
-        expect = data.get("Expect")
-        open_code = data.get("OpenCode")
+            if current_time - current_game_state["last_checked_time"] < config["refresh_interval"]:
+                continue 
 
-        if not all([issue_id, expect, open_code]):
-            # print("Dữ liệu API không đầy đủ (thiếu ID, Expect, hoặc OpenCode). Bỏ qua phiên này.")
-            time.sleep(5)
-            continue
+            current_game_state["last_checked_time"] = current_time 
 
-        if issue_id != last_id:
-            try:
-                dice = tuple(map(int, open_code.split(",")))
-            except ValueError:
-                print(f"Lỗi phân tích OpenCode: '{open_code}'. Bỏ qua phiên này.")
-                last_id = issue_id # Vẫn cập nhật last_id để không lặp lại lỗi
-                time.sleep(5)
+            data = lay_du_lieu(game_id)
+            if not data:
+                print(f"DEBUG: ❌ Không lấy được dữ liệu hoặc dữ liệu không hợp lệ cho {config['name']}. Bỏ qua phiên này.")
+                continue 
+
+            issue_id = data.get("ID")
+            expect = data.get("Expect")
+            open_code = data.get("OpenCode")
+
+            if not all([issue_id, expect, open_code]):
+                print(f"DEBUG: Dữ liệu API {config['name']} không đầy đủ (thiếu ID, Expect, hoặc OpenCode). Bỏ qua phiên này.")
+                current_game_state["last_id"] = issue_id # Vẫn cập nhật last_id để không lặp lại lỗi cũ
                 continue
-            
-            ket_qua_tx, tong = tinh_tai_xiu(dice)
 
-            # Lưu lịch sử phiên Tài Xỉu
-            if len(tx_history) >= TX_HISTORY_LENGTH:
-                tx_history.pop(0)
-            tx_history.append("T" if ket_qua_tx == "Tài" else "X")
+            # Chỉ xử lý nếu có phiên mới
+            if issue_id != current_game_state["last_id"]:
+                current_game_state["last_id"] = issue_id 
+                print(f"\n--- Xử lý phiên mới cho {config['name']} ({issue_id}) ---") 
 
-            next_expect = str(int(expect) + 1).zfill(len(expect))
-            du_doan_co_so = du_doan_theo_xi_ngau([dice]) # Dự đoán ban đầu theo xí ngầu
-            du_doan_cuoi_cung = du_doan_co_so
-            ly_do = ""
-            current_cau_str = ""
+                try:
+                    dice = tuple(map(int, open_code.split(",")))
+                    if len(dice) != 3:
+                        raise ValueError("OpenCode không chứa 3 xúc xắc.")
+                except ValueError as e:
+                    print(f"Lỗi phân tích OpenCode cho {config['name']}: '{open_code}'. Lỗi: {e}. Bỏ qua phiên này.")
+                    continue
+                
+                ket_qua_tx, tong = tinh_tai_xiu(dice)
 
-            # --- Logic điều chỉnh dự đoán (chỉ áp dụng mẫu cầu động) ---
-            if len(tx_history) == TX_HISTORY_LENGTH:
-                current_cau_str = ''.join(tx_history)
-                pattern_adjustment = get_pattern_prediction_adjustment(current_cau_str)
+                tx_history_for_game = current_game_state["tx_history"]
+                tx_history_length = config["tx_history_length"]
 
-                if pattern_adjustment == "giữ nguyên":
-                    ly_do = f"AI Cầu đẹp ({current_cau_str}) → Giữ nguyên kết quả"
-                elif pattern_adjustment == "đảo chiều":
-                    du_doan_cuoi_cung = "Xỉu" if du_doan_co_so == "Tài" else "Tài" # Đảo chiều
-                    ly_do = f"AI Cầu xấu ({current_cau_str}) → Đảo chiều kết quả"
+                if len(tx_history_for_game) >= tx_history_length:
+                    tx_history_for_game.pop(0)
+                tx_history_for_game.append("T" if ket_qua_tx == "Tài" else "X")
+                current_game_state["tx_history"] = tx_history_for_game 
+
+                # Tính next_expect tùy thuộc vào game_id
+                if game_id == "luckywin":
+                    next_expect = str(int(expect) + 1).zfill(len(expect))
+                elif game_id in ["hitclub", "sunwin"]: # Áp dụng cho cả Hit Club và Sunwin
+                    next_expect = str(int(expect) + 1) 
                 else:
-                    ly_do = f"AI Không rõ/Đang học mẫu cầu ({current_cau_str}) → Dự đoán theo xí ngầu"
+                    next_expect = str(int(expect) + 1) 
+
+                du_doan_co_so = du_doan_theo_xi_ngau([dice]) 
+                du_doan_cuoi_cung = du_doan_co_so
+                ly_do = ""
+                current_cau_str = ""
+
+                if len(tx_history_for_game) == tx_history_length:
+                    current_cau_str = ''.join(tx_history_for_game)
+                    pattern_adjustment = get_pattern_prediction_adjustment(game_id, current_cau_str)
+
+                    if pattern_adjustment == "giữ nguyên":
+                        ly_do = f"AI Cầu đẹp ({current_cau_str}) → Giữ nguyên kết quả"
+                    elif pattern_adjustment == "đảo chiều":
+                        du_doan_cuoi_cung = "Xỉu" if du_doan_co_so == "Tài" else "Tài" 
+                        ly_do = f"AI Cầu xấu ({current_cau_str}) → Đảo chiều kết quả"
+                    else:
+                        ly_do = f"AI Không rõ/Đang học mẫu cầu ({current_cau_str}) → Dự đoán theo xí ngầu"
+                else:
+                    ly_do = f"AI Dự đoán theo xí ngầu (chưa đủ lịch sử cầu {tx_history_length} ký tự)"
+
+                if len(tx_history_for_game) == tx_history_length:
+                    prediction_correct = (du_doan_cuoi_cung == "Tài" and ket_qua_tx == "Tài") or \
+                                         (du_doan_cuoi_cung == "Xỉu" and ket_qua_tx == "Xỉu")
+                    update_cau_patterns(game_id, current_cau_str, prediction_correct)
+                    print(f"DEBUG: Cập nhật mẫu cầu cho {game_id}: {current_cau_str}, Đúng: {prediction_correct}")
+
+                # Gửi tin nhắn dự đoán tới tất cả người dùng có quyền truy cập
+                print(f"DEBUG: Gửi tin nhắn dự đoán cho {config['name']} - Phiên {next_expect} ({du_doan_cuoi_cung})...")
+                sent_count = 0
+                for user_id_str, user_info in list(user_data.items()): 
+                    user_id = int(user_id_str)
+                    
+                    # Kiểm tra xem người dùng đã tạm ngừng nhận dự đoán chưa
+                    if user_info.get('is_paused_prediction', False):
+                        # print(f"DEBUG: User {user_id} đã tạm ngừng nhận dự đoán. Bỏ qua.") # Log này có thể gây nhiễu nếu nhiều user
+                        continue 
+
+                    is_sub, sub_message = check_subscription(user_id)
+                    if is_sub:
+                        try:
+                            prediction_message = (
+                                f"🎮 **KẾT QUẢ PHIÊN HIỆN TẠI ({config['name']})** 🎮\n"
+                                f"Phiên: `{expect}` | Kết quả: **{ket_qua_tx}** (Tổng: **{tong}**)\n\n"
+                                f"**Dự đoán cho phiên tiếp theo:**\n"
+                                f"🔢 Phiên: `{next_expect}`\n"
+                                f"🤖 Dự đoán: **{du_doan_cuoi_cung}**\n"
+                                f"📌 Lý do: _{ly_do}_\n"
+                                f"⚠️ **Hãy đặt cược sớm trước khi phiên kết thúc!**"
+                            )
+                            bot.send_message(user_id, prediction_message, parse_mode='Markdown')
+                            sent_count += 1
+                        except telebot.apihelper.ApiTelegramException as e:
+                            if "bot was blocked by the user" in str(e) or "user is deactivated" in str(e):
+                                pass 
+                            else:
+                                print(f"Lỗi gửi tin nhắn cho user {user_id} (game {game_id}): {e}")
+                        except Exception as e:
+                            print(f"Lỗi không xác định khi gửi tin nhắn cho user {user_id} (game {game_id}): {e}")
+                
+                print(f"DEBUG: Đã gửi dự đoán cho {config['name']} tới {sent_count} người dùng.")
+                print("-" * 50)
+                print(f"🎮 KẾT QUẢ VÀ DỰ ĐOÁN CHO {config['name']}")
+                print(f"Phiên hiện tại: `{expect}` | Kết quả: {ket_qua_tx} (Tổng: {tong})")
+                print(f"🔢 Phiên tiếp theo: `{next_expect}`")
+                print(f"🤖 Dự đoán: {du_doan_cuoi_cung}")
+                print(f"📌 Lý do: {ly_do}")
+                print(f"Lịch sử TX ({tx_history_length} phiên): {''.join(tx_history_for_game)}")
+                print("-" * 50)
             else:
-                ly_do = "AI Dự đoán theo xí ngầu (chưa đủ lịch sử cầu)"
-
-
-            # Cập nhật độ tin cậy của mẫu cầu dựa trên kết quả thực tế
-            if len(tx_history) == TX_HISTORY_LENGTH:
-                prediction_correct = (du_doan_cuoi_cung == "Tài" and ket_qua_tx == "Tài") or \
-                                     (du_doan_cuoi_cung == "Xỉu" and ket_qua_tx == "Xỉu")
-                update_cau_patterns(current_cau_str, prediction_correct)
-
-            # Gửi tin nhắn dự đoán tới tất cả người dùng có quyền truy cập
-            for user_id_str, user_info in list(user_data.items()): # Dùng list() để tránh lỗi khi user_data thay đổi
-                user_id = int(user_id_str)
-                is_sub, sub_message = check_subscription(user_id)
-                if is_sub:
-                    try:
-                        prediction_message = (
-                            "🎮 **KẾT QUẢ PHIÊN HIỆN TẠI** 🎮\n"
-                            f"Phiên: `{expect}` | Kết quả: **{ket_qua_tx}** (Tổng: **{tong}**)\n\n"
-                            f"**Dự đoán cho phiên tiếp theo:**\n"
-                            f"🔢 Phiên: `{next_expect}`\n"
-                            f"🤖 Dự đoán: **{du_doan_cuoi_cung}**\n"
-                            f"📌 Lý do: _{ly_do}_\n"
-                            f"⚠️ **Hãy đặt cược sớm trước khi phiên kết thúc!**"
-                        )
-                        bot.send_message(user_id, prediction_message, parse_mode='Markdown')
-                    except telebot.apihelper.ApiTelegramException as e:
-                        if "bot was blocked by the user" in str(e) or "user is deactivated" in str(e):
-                            # print(f"Người dùng {user_id} đã chặn bot hoặc bị vô hiệu hóa.")
-                            pass
-                        else:
-                            print(f"Lỗi gửi tin nhắn cho user {user_id}: {e}")
-                    except Exception as e:
-                        print(f"Lỗi không xác định khi gửi tin nhắn cho user {user_id}: {e}")
-
-            print("-" * 50)
-            print("🎮 Kết quả phiên hiện tại: {} (Tổng: {})".format(ket_qua_tx, tong))
-            print("🔢 Phiên: {} → {}".format(expect, next_expect))
-            print("🤖 Dự đoán: {}".format(du_doan_cuoi_cung))
-            print("📌 Lý do: {}".format(ly_do))
-            print("Lịch sử TX: {}. ".format(''.join(tx_history))) # Không còn lịch sử MD5
-            print("-" * 50)
-
-            last_id = issue_id
-
-        time.sleep(5) # Đợi 5 giây trước khi kiểm tra phiên mới
+                pass
+        
+        time.sleep(5) 
     print("Prediction loop stopped.")
 
 # --- Xử lý lệnh Telegram ---
@@ -325,15 +425,18 @@ def send_welcome(message):
         user_data[user_id] = {
             'username': username,
             'expiry_date': None,
-            'is_ctv': False
+            'is_ctv': False,
+            'is_paused_prediction': False # Mặc định không tạm ngừng
         }
         save_user_data(user_data)
         bot.reply_to(message, 
-                     "Chào mừng bạn đến với **BOT DỰ ĐOÁN TÀI XỈU LUCKYWIN**!\n"
+                     "Chào mừng bạn đến với **BOT DỰ ĐOÁN TÀI XỈU**!\n"
                      "Hãy dùng lệnh /help để xem danh sách các lệnh hỗ trợ.", 
                      parse_mode='Markdown')
     else:
-        user_data[user_id]['username'] = username # Cập nhật username nếu có thay đổi
+        user_data[user_id]['username'] = username 
+        # Đảm bảo trường is_paused_prediction tồn tại nếu người dùng cũ
+        user_data[user_id].setdefault('is_paused_prediction', False) 
         save_user_data(user_data)
         bot.reply_to(message, "Bạn đã khởi động bot rồi. Dùng /help để xem các lệnh.")
 
@@ -348,16 +451,21 @@ def show_help(message):
         "🔸 `/gia`: Xem bảng giá dịch vụ.\n"
         "🔸 `/gopy <nội dung>`: Gửi góp ý/báo lỗi cho Admin.\n"
         "🔸 `/nap`: Hướng dẫn nạp tiền.\n"
-        "🔸 `/dudoan`: Bắt đầu nhận dự đoán từ bot.\n"
-        "🔸 `/maucau`: Hiển thị các mẫu cầu bot đã thu thập (xấu/đẹp).\n"
-        "🔸 `/code <mã_code>`: Nhập mã code để gia hạn tài khoản.\n\n"
+        "🔸 `/dudoan`: Bắt đầu nhận dự đoán từ bot (Luckywin).\n"
+        "🔸 `/dudoan_hitclub`: Bắt đầu nhận dự đoán từ bot (Hit Club).\n"
+        "🔸 `/dudoan_sunwin`: Bắt đầu nhận dự đoán từ bot (Sunwin).\n" # Lệnh mới
+        "🔸 `/maucau [tên game]`: Hiển thị các mẫu cầu bot đã thu thập (xấu/đẹp). (ví dụ: `/maucau luckywin` hoặc `/maucau hitclub`)\n"
+        "🔸 `/code <mã_code>`: Nhập mã code để gia hạn tài khoản.\n"
+        "🔸 `/stop`: Tạm ngừng nhận dự đoán từ bot.\n" # Lệnh mới
+        "🔸 `/continue`: Tiếp tục nhận dự đoán từ bot.\n\n" # Lệnh mới
     )
     
     if is_ctv(message.chat.id):
         help_text += (
             "**Lệnh Admin/CTV:**\n"
             "🔹 `/full <id>`: Xem thông tin người dùng (để trống ID để xem của bạn).\n"
-            "🔹 `/giahan <id> <số ngày/giờ>`: Gia hạn tài khoản người dùng. Ví dụ: `/giahan 12345 1 ngày` hoặc `/giahan 12345 24 giờ`.\n\n"
+            "🔹 `/giahan <id> <số ngày/giờ>`: Gia hạn tài khoản người dùng. Ví dụ: `/giahan 12345 1 ngày` hoặc `/giahan 12345 24 giờ`.\n"
+            "🔹 `/nhapcau <tên game>`: Nhập các mẫu cầu từ văn bản cho bot. (ví dụ: `/nhapcau luckywin` sau đó gửi text)\n\n"
         )
     
     if is_admin(message.chat.id):
@@ -388,7 +496,7 @@ def show_price(message):
         "💸 **50k**: 1 Tuần\n"
         "💸 **80k**: 2 Tuần\n"
         "💸 **130k**: 1 Tháng\n\n"
-        "🤖 BOT LUCKYWIn TỈ Lệ **85-92%**\n"
+        "🤖 BOT LUCKYWIN TỈ Lệ **85-92%**\n"
         "⏱️ ĐỌC 24/24\n\n"
         "Vui Lòng ib @heheviptool hoặc @Besttaixiu999 Để Gia Hạn"
     )
@@ -401,7 +509,7 @@ def send_feedback(message):
         bot.reply_to(message, "Vui lòng nhập nội dung góp ý. Ví dụ: `/gopy Bot dự đoán rất chuẩn!`", parse_mode='Markdown')
         return
     
-    admin_id = ADMIN_IDS[0] # Gửi cho Admin đầu tiên trong danh sách
+    admin_id = ADMIN_IDS[0] 
     user_name = message.from_user.username or message.from_user.first_name
     bot.send_message(admin_id, 
                      f"📢 **GÓP Ý MỚI TỪ NGƯỜI DÙNG** 📢\n\n"
@@ -430,9 +538,10 @@ def show_deposit_info(message):
     bot.reply_to(message, deposit_text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['dudoan'])
-def start_prediction_command(message):
-    user_id = message.chat.id
-    is_sub, sub_message = check_subscription(user_id)
+def start_prediction_luckywin_command(message):
+    game_id = "luckywin" 
+    user_id_str = str(message.chat.id)
+    is_sub, sub_message = check_subscription(message.chat.id)
     
     if not is_sub:
         bot.reply_to(message, sub_message + "\nVui lòng liên hệ Admin @heheviptool hoặc @Besttaixiu999 để được hỗ trợ.", parse_mode='Markdown')
@@ -442,33 +551,120 @@ def start_prediction_command(message):
         bot.reply_to(message, f"❌ Bot dự đoán hiện đang tạm dừng bởi Admin. Lý do: `{bot_disable_reason}`", parse_mode='Markdown')
         return
 
-    bot.reply_to(message, "✅ Bạn đang có quyền truy cập. Bot sẽ tự động gửi dự đoán các phiên mới nhất tại đây.")
+    # Nếu đang tạm ngừng, cho phép nhận lại dự đoán
+    if user_data.get(user_id_str, {}).get('is_paused_prediction', False):
+        user_data[user_id_str]['is_paused_prediction'] = False
+        save_user_data(user_data)
+        bot.reply_to(message, "✅ Bạn đã bật lại nhận dự đoán.")
+        
+    bot.reply_to(message, f"✅ Bạn đang có quyền truy cập. Bot sẽ tự động gửi dự đoán các phiên mới nhất của **{GAME_CONFIGS[game_id]['name']}** tại đây.")
+
+@bot.message_handler(commands=['dudoan_hitclub'])
+def start_prediction_hitclub_command(message):
+    game_id = "hitclub" 
+    user_id_str = str(message.chat.id)
+    is_sub, sub_message = check_subscription(message.chat.id)
+    
+    if not is_sub:
+        bot.reply_to(message, sub_message + "\nVui lòng liên hệ Admin @heheviptool hoặc @Besttaixiu999 để được hỗ trợ.", parse_mode='Markdown')
+        return
+    
+    if not bot_enabled:
+        bot.reply_to(message, f"❌ Bot dự đoán hiện đang tạm dừng bởi Admin. Lý do: `{bot_disable_reason}`", parse_mode='Markdown')
+        return
+
+    # Nếu đang tạm ngừng, cho phép nhận lại dự đoán
+    if user_data.get(user_id_str, {}).get('is_paused_prediction', False):
+        user_data[user_id_str]['is_paused_prediction'] = False
+        save_user_data(user_data)
+        bot.reply_to(message, "✅ Bạn đã bật lại nhận dự đoán.")
+
+    bot.reply_to(message, f"✅ Bạn đang có quyền truy cập. Bot sẽ tự động gửi dự đoán các phiên mới nhất của **{GAME_CONFIGS[game_id]['name']}** tại đây.")
+
+@bot.message_handler(commands=['dudoan_sunwin']) # Lệnh mới cho Sunwin
+def start_prediction_sunwin_command(message):
+    game_id = "sunwin" 
+    user_id_str = str(message.chat.id)
+    is_sub, sub_message = check_subscription(message.chat.id)
+    
+    if not is_sub:
+        bot.reply_to(message, sub_message + "\nVui lòng liên hệ Admin @heheviptool hoặc @Besttaixiu999 để được hỗ trợ.", parse_mode='Markdown')
+        return
+    
+    if not bot_enabled:
+        bot.reply_to(message, f"❌ Bot dự đoán hiện đang tạm dừng bởi Admin. Lý do: `{bot_disable_reason}`", parse_mode='Markdown')
+        return
+
+    # Nếu đang tạm ngừng, cho phép nhận lại dự đoán
+    if user_data.get(user_id_str, {}).get('is_paused_prediction', False):
+        user_data[user_id_str]['is_paused_prediction'] = False
+        save_user_data(user_data)
+        bot.reply_to(message, "✅ Bạn đã bật lại nhận dự đoán.")
+
+    bot.reply_to(message, f"✅ Bạn đang có quyền truy cập. Bot sẽ tự động gửi dự đoán các phiên mới nhất của **{GAME_CONFIGS[game_id]['name']}** tại đây.")
+
+
+@bot.message_handler(commands=['stop'])
+def stop_predictions(message):
+    user_id_str = str(message.chat.id)
+    if user_id_str not in user_data:
+        bot.reply_to(message, "Bạn chưa khởi động bot. Vui lòng dùng /start trước.")
+        return
+
+    user_data[user_id_str]['is_paused_prediction'] = True
+    save_user_data(user_data)
+    bot.reply_to(message, "⏸️ Bạn đã tạm ngừng nhận dự đoán từ bot. Dùng `/continue` để tiếp tục.")
+
+@bot.message_handler(commands=['continue'])
+def continue_predictions(message):
+    user_id_str = str(message.chat.id)
+    if user_id_str not in user_data:
+        bot.reply_to(message, "Bạn chưa khởi động bot. Vui lòng dùng /start trước.")
+        return
+
+    if not user_data.get(user_id_str, {}).get('is_paused_prediction', False):
+        bot.reply_to(message, "✅ Bạn đang nhận dự đoán rồi.")
+        return
+
+    user_data[user_id_str]['is_paused_prediction'] = False
+    save_user_data(user_data)
+    bot.reply_to(message, "▶️ Bạn đã tiếp tục nhận dự đoán từ bot.")
+
 
 @bot.message_handler(commands=['maucau'])
 def show_cau_patterns_command(message):
-    if not is_ctv(message.chat.id): # Chỉ Admin/CTV mới được xem mẫu cầu chi tiết
+    if not is_ctv(message.chat.id): 
         bot.reply_to(message, "Bạn không có quyền sử dụng lệnh này.")
         return
+    
+    args = telebot.util.extract_arguments(message.text).split()
+    if not args or args[0].lower() not in GAME_CONFIGS:
+        bot.reply_to(message, "Vui lòng chỉ định tên game (luckywin, hitclub hoặc sunwin). Ví dụ: `/maucau luckywin`", parse_mode='Markdown')
+        return
+    
+    game_id = args[0].lower()
+    game_name = GAME_CONFIGS[game_id]['name']
 
-    if not CAU_PATTERNS:
-        pattern_text = "📚 **CÁC MẪU CẦU ĐÃ THU THUẬT** 📚\n\nKhông có mẫu cầu nào được thu thập."
+    game_patterns = CAU_PATTERNS.get(game_id, {})
+
+    if not game_patterns:
+        pattern_text = f"📚 **CÁC MẪU CẦU ĐÃ THU THUẬT CHO {game_name}** 📚\n\nKhông có mẫu cầu nào được thu thập."
     else:
-        sorted_patterns = sorted(CAU_PATTERNS.items(), key=lambda item: item[1], reverse=True)
+        sorted_patterns = sorted(game_patterns.items(), key=lambda item: item[1], reverse=True)
         dep_patterns_list = []
         xau_patterns_list = []
 
         for pattern, confidence in sorted_patterns:
-            if confidence >= 2.5: # Ngưỡng "đẹp"
+            if confidence >= 2.5: 
                 dep_patterns_list.append(f"{pattern} ({confidence:.2f})")
-            elif confidence <= 0.5: # Ngưỡng "xấu"
+            elif confidence <= 0.5: 
                 xau_patterns_list.append(f"{pattern} ({confidence:.2f})")
-            # Các mẫu ở giữa không rõ ràng thì không liệt kê vào đây
 
         dep_patterns_str = "\n".join(dep_patterns_list) if dep_patterns_list else "Không có"
         xau_patterns_str = "\n".join(xau_patterns_list) if xau_patterns_list else "Không có"
 
         pattern_text = (
-            "📚 **CÁC MẪU CẦU ĐÃ THU THUẬT** 📚\n\n"
+            f"📚 **CÁC MẪU CẦU ĐÃ THU THUẬT CHO {game_name}** 📚\n\n"
             "**🟢 Cầu Đẹp (Confidence >= 2.5):**\n"
             f"```\n{dep_patterns_str}\n```\n\n"
             "**🔴 Cầu Xấu (Confidence <= 0.5):**\n"
@@ -476,6 +672,61 @@ def show_cau_patterns_command(message):
             "*(Các mẫu cầu này được bot tự động học hỏi theo thời gian. Số trong ngoặc là điểm tin cậy)*"
         )
     bot.reply_to(message, pattern_text, parse_mode='Markdown')
+
+@bot.message_handler(commands=['nhapcau'])
+def prompt_import_patterns(message):
+    if not is_ctv(message.chat.id):
+        bot.reply_to(message, "Bạn không có quyền sử dụng lệnh này.")
+        return
+    
+    args = telebot.util.extract_arguments(message.text).split()
+    if not args or args[0].lower() not in GAME_CONFIGS:
+        bot.reply_to(message, "Vui lòng chỉ định tên game (luckywin, hitclub hoặc sunwin) để nhập cầu. Ví dụ: `/nhapcau luckywin`", parse_mode='Markdown')
+        return
+    
+    game_id = args[0].lower()
+    game_name = GAME_CONFIGS[game_id]['name']
+
+    markup = telebot.types.ForceReply(selective=True)
+    msg = bot.reply_to(message, f"Vui lòng dán văn bản chứa mẫu cầu {game_name} (theo định dạng /maucau) vào đây:", reply_markup=markup)
+    bot.register_next_step_handler(msg, import_patterns_from_text, game_id)
+
+def import_patterns_from_text(message, game_id):
+    if not is_ctv(message.chat.id):
+        bot.reply_to(message, "Bạn không có quyền sử dụng lệnh này.")
+        return
+
+    input_text = message.text
+    new_patterns_count = 0
+    updated_patterns_count = 0
+    
+    import re
+    pattern_regex = re.compile(r'([TX]+)\s+\((\d+\.\d+)\)')
+
+    lines = input_text.split('\n')
+    
+    current_game_patterns = CAU_PATTERNS.get(game_id, {})
+
+    for line in lines:
+        match = pattern_regex.search(line)
+        if match:
+            pattern_str = match.group(1)
+            confidence = float(match.group(2))
+            
+            if pattern_str in current_game_patterns:
+                updated_patterns_count += 1
+            else:
+                new_patterns_count += 1
+            
+            current_game_patterns[pattern_str] = confidence
+    
+    CAU_PATTERNS[game_id] = current_game_patterns
+    save_cau_patterns()
+
+    bot.reply_to(message, 
+                 f"✅ Đã nhập mẫu cầu cho **{GAME_CONFIGS[game_id]['name']}** thành công!\n"
+                 f"Mới: {new_patterns_count} mẫu. Cập nhật: {updated_patterns_count} mẫu.",
+                 parse_mode='Markdown')
 
 
 @bot.message_handler(commands=['code'])
@@ -496,17 +747,15 @@ def use_code(message):
         bot.reply_to(message, "❌ Mã code này đã được sử dụng rồi.")
         return
 
-    # Apply extension
     current_expiry_str = user_data.get(user_id, {}).get('expiry_date')
     if current_expiry_str:
         current_expiry_date = datetime.strptime(current_expiry_str, '%Y-%m-%d %H:%M:%S')
-        # If current expiry is in the past, start from now
         if datetime.now() > current_expiry_date:
             new_expiry_date = datetime.now()
         else:
             new_expiry_date = current_expiry_date
     else:
-        new_expiry_date = datetime.now() # Start from now if no previous expiry
+        new_expiry_date = datetime.now() 
 
     value = code_info['value']
     if code_info['type'] == 'ngày':
@@ -516,6 +765,8 @@ def use_code(message):
     
     user_data.setdefault(user_id, {})['expiry_date'] = new_expiry_date.strftime('%Y-%m-%d %H:%M:%S')
     user_data[user_id]['username'] = message.from_user.username or message.from_user.first_name
+    # Đảm bảo trường is_paused_prediction tồn tại khi cập nhật user_data
+    user_data[user_id].setdefault('is_paused_prediction', False)
     
     GENERATED_CODES[code_str]['used_by'] = user_id
     GENERATED_CODES[code_str]['used_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -553,13 +804,15 @@ def get_user_info(message):
     expiry_date_str = user_info.get('expiry_date', 'Không có')
     username = user_info.get('username', 'Không rõ')
     is_ctv_status = "Có" if is_ctv(int(target_user_id_str)) else "Không"
+    is_paused_status = "Có" if user_info.get('is_paused_prediction', False) else "Không"
 
     info_text = (
-        f"**THÔNG TIN NGƯỜNG DÙNG**\n"
+        f"**THÔNG TIN NGƯỠNG DÙNG**\n"
         f"**ID:** `{target_user_id_str}`\n"
         f"**Tên:** @{username}\n"
         f"**Ngày hết hạn:** `{expiry_date_str}`\n"
-        f"**Là CTV/Admin:** {is_ctv_status}"
+        f"**Là CTV/Admin:** {is_ctv_status}\n"
+        f"**Tạm ngừng dự đoán:** {is_paused_status}"
     )
     bot.reply_to(message, info_text, parse_mode='Markdown')
 
@@ -577,13 +830,14 @@ def extend_subscription(message):
     
     target_user_id_str = args[0]
     value = int(args[1])
-    unit = args[2].lower() # 'ngày' or 'giờ'
+    unit = args[2].lower() 
     
     if target_user_id_str not in user_data:
         user_data[target_user_id_str] = {
             'username': "UnknownUser",
             'expiry_date': None,
-            'is_ctv': False
+            'is_ctv': False,
+            'is_paused_prediction': False # Mặc định không tạm ngừng
         }
         bot.send_message(message.chat.id, f"Đã tạo tài khoản mới cho user ID `{target_user_id_str}`.")
 
@@ -595,7 +849,7 @@ def extend_subscription(message):
         else:
             new_expiry_date = current_expiry_date
     else:
-        new_expiry_date = datetime.now() # Start from now if no previous expiry
+        new_expiry_date = datetime.now() 
 
     if unit == 'ngày':
         new_expiry_date += timedelta(days=value)
@@ -603,6 +857,7 @@ def extend_subscription(message):
         new_expiry_date += timedelta(hours=value)
     
     user_data[target_user_id_str]['expiry_date'] = new_expiry_date.strftime('%Y-%m-%d %H:%M:%S')
+    user_data[target_user_id_str]['username'] = user_data[target_user_id_str].get('username', 'UnknownUser') 
     save_user_data(user_data)
     
     bot.reply_to(message, 
@@ -617,7 +872,6 @@ def extend_subscription(message):
                          parse_mode='Markdown')
     except telebot.apihelper.ApiTelegramException as e:
         if "bot was blocked by the user" in str(e):
-            # print(f"Không thể thông báo gia hạn cho user {target_user_id_str}: Người dùng đã chặn bot.")
             pass
         else:
             print(f"Không thể thông báo gia hạn cho user {target_user_id_str}: {e}")
@@ -639,10 +893,12 @@ def add_ctv(message):
         user_data[target_user_id_str] = {
             'username': "UnknownUser",
             'expiry_date': None,
-            'is_ctv': True
+            'is_ctv': True,
+            'is_paused_prediction': False # Mặc định không tạm ngừng
         }
     else:
         user_data[target_user_id_str]['is_ctv'] = True
+        user_data[target_user_id_str].setdefault('is_paused_prediction', False)
     
     save_user_data(user_data)
     bot.reply_to(message, f"Đã cấp quyền CTV cho user ID `{target_user_id_str}`.")
@@ -689,21 +945,23 @@ def send_broadcast(message):
     fail_count = 0
     for user_id_str in list(user_data.keys()):
         try:
+            # Không gửi thông báo broadcast cho người dùng đã tạm ngừng dự đoán
+            if user_data[user_id_str].get('is_paused_prediction', False):
+                continue
+            
             bot.send_message(int(user_id_str), f"📢 **THÔNG BÁO TỪ ADMIN** 📢\n\n{broadcast_text}", parse_mode='Markdown')
             success_count += 1
-            time.sleep(0.1) # Tránh bị rate limit
+            time.sleep(0.1) 
         except telebot.apihelper.ApiTelegramException as e:
-            # print(f"Không thể gửi thông báo cho user {user_id_str}: {e}")
             fail_count += 1
             if "bot was blocked by the user" in str(e) or "user is deactivated" in str(e):
-                # print(f"Người dùng {user_id_str} đã chặn bot hoặc bị vô hiệu hóa. Có thể xóa khỏi user_data.")
                 pass
         except Exception as e:
             print(f"Lỗi không xác định khi gửi thông báo cho user {user_id_str}: {e}")
             fail_count += 1
                 
     bot.reply_to(message, f"Đã gửi thông báo đến {success_count} người dùng. Thất bại: {fail_count}.")
-    save_user_data(user_data) # Lưu lại nếu có user bị xóa
+    save_user_data(user_data) 
 
 @bot.message_handler(commands=['tatbot'])
 def disable_bot_command(message):
@@ -745,7 +1003,7 @@ def generate_code_command(message):
         return
     
     args = telebot.util.extract_arguments(message.text).split()
-    if len(args) < 2 or len(args) > 3: # Giá trị, đơn vị, số lượng (tùy chọn)
+    if len(args) < 2 or len(args) > 3: 
         bot.reply_to(message, "Cú pháp sai. Ví dụ:\n"
                               "`/taocode <giá_trị> <ngày/giờ> <số_lượng>`\n"
                               "Ví dụ: `/taocode 1 ngày 5` (tạo 5 code 1 ngày)\n"
@@ -755,7 +1013,7 @@ def generate_code_command(message):
     try:
         value = int(args[0])
         unit = args[1].lower()
-        quantity = int(args[2]) if len(args) == 3 else 1 # Mặc định tạo 1 code nếu không có số lượng
+        quantity = int(args[2]) if len(args) == 3 else 1 
         
         if unit not in ['ngày', 'giờ']:
             bot.reply_to(message, "Đơn vị không hợp lệ. Chỉ chấp nhận `ngày` hoặc `giờ`.", parse_mode='Markdown')
@@ -766,7 +1024,7 @@ def generate_code_command(message):
 
         generated_codes_list = []
         for _ in range(quantity):
-            new_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8)) # 8 ký tự ngẫu nhiên
+            new_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8)) 
             GENERATED_CODES[new_code] = {
                 "value": value,
                 "type": unit,
@@ -817,7 +1075,6 @@ def start_bot_threads():
             print("Prediction loop thread started.")
 
             # Start bot polling in a separate thread
-            # Use bot.infinity_polling() for robust polling
             polling_thread = Thread(target=bot.infinity_polling, kwargs={'none_stop': True})
             polling_thread.daemon = True
             polling_thread.start()
@@ -827,9 +1084,6 @@ def start_bot_threads():
 
 # --- Điểm khởi chạy chính cho Gunicorn/Render ---
 if __name__ == '__main__':
-    # When running locally, ensure threads are started
-    # For Render, gunicorn will call the Flask app, and @app.before_request will handle initialization
-    # No need to call app.run() directly if Gunicorn is used as main entry point
     port = int(os.environ.get('PORT', 5000))
     print(f"Starting Flask app locally on port {port}")
     app.run(host='0.0.0.0', port=port, debug=True)
