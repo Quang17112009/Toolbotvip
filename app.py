@@ -3,18 +3,20 @@ import requests
 import time
 import json
 import os
+import random
+import string
 from datetime import datetime, timedelta
 from threading import Thread, Event # Thêm Event để kiểm soát bot
 
+BOT_TOKEN = "7658240012:AAFAZSC7ONQ1KRGNtskAUr-Pepuv4n7KjvE" 
+# THAY THẾ BẰNG ID ADMIN THẬT CỦA BẠN. Có thể có nhiều ID, cách nhau bởi dấu phẩy.
+ADMIN_IDS = [6915752059] # Ví dụ: [6915752059, 123456789]
 
-# --- Cấu hình Bot (sẽ được inject từ app.py) ---
-BOT_TOKEN = None
-ADMIN_IDS = []
 DATA_FILE = 'user_data.json'
 CAU_PATTERNS_FILE = 'cau_patterns.json'
 CODES_FILE = 'codes.json'
 
-bot = None # Sẽ được khởi tạo từ app.py
+bot = None # Sẽ được khởi tạo trong setup_handlers
 
 # Global flags
 bot_enabled = True
@@ -279,11 +281,9 @@ def prediction_loop(stop_event: Event):
 
 # --- Xử lý lệnh Telegram ---
 
-def setup_handlers(_bot, token, admin_ids):
-    global bot, BOT_TOKEN, ADMIN_IDS
+def setup_handlers(_bot):
+    global bot
     bot = _bot
-    BOT_TOKEN = token
-    ADMIN_IDS = admin_ids
 
     @bot.message_handler(commands=['start'])
     def send_welcome(message):
@@ -298,7 +298,7 @@ def setup_handlers(_bot, token, admin_ids):
             }
             save_user_data(user_data)
             bot.reply_to(message, 
-                         "Chào mừng bạn đến với **BOT DỰ ĐOÁN TÀI XỈU SUNWIN**!\n"
+                         "Chào mừng bạn đến với **BOT DỰ ĐOÁN TÀI XỈU LUCKYWIN**!\n"
                          "Hãy dùng lệnh /help để xem danh sách các lệnh hỗ trợ.", 
                          parse_mode='Markdown')
         else:
@@ -352,12 +352,12 @@ def setup_handlers(_bot, token, admin_ids):
     @bot.message_handler(commands=['gia'])
     def show_price(message):
         price_text = (
-            "📊 **BOT SUNWIN XIN THÔNG BÁO BẢNG GIÁ SUN BOT** 📊\n\n"
+            "📊 **BOT LUCKYWIN XIN THÔNG BÁO BẢNG GIÁ SUN BOT** 📊\n\n"
             "💸 **20k**: 1 Ngày\n"
             "💸 **50k**: 1 Tuần\n"
             "💸 **80k**: 2 Tuần\n"
             "💸 **130k**: 1 Tháng\n\n"
-            "🤖 BOT SUN TỈ Lệ **85-92%**\n"
+            "🤖 BOT LUCKYWIN TỈ Lệ **85-92%**\n"
             "⏱️ ĐỌC 24/24\n\n"
             "Vui Lòng ib @heheviptool hoặc @Besttaixiu999 Để Gia Hạn"
         )
@@ -712,17 +712,17 @@ def setup_handlers(_bot, token, admin_ids):
             return
         
         args = telebot.util.extract_arguments(message.text).split()
-        if len(args) not in [3, 4]: # Giá trị, đơn vị, số lượng (tùy chọn)
+        if len(args) < 2 or len(args) > 3: # Giá trị, đơn vị, số lượng (tùy chọn)
             bot.reply_to(message, "Cú pháp sai. Ví dụ:\n"
                                   "`/taocode <giá_trị> <ngày/giờ> <số_lượng>`\n"
                                   "Ví dụ: `/taocode 1 ngày 5` (tạo 5 code 1 ngày)\n"
-                                  "Hoặc: `/taocode 24 giờ 1` (tạo 1 code 24 giờ)", parse_mode='Markdown')
+                                  "Hoặc: `/taocode 24 giờ` (tạo 1 code 24 giờ)", parse_mode='Markdown')
             return
         
         try:
             value = int(args[0])
             unit = args[1].lower()
-            quantity = int(args[2]) if len(args) == 3 else 1 # Mặc định tạo 1 code
+            quantity = int(args[2]) if len(args) == 3 else 1 # Mặc định tạo 1 code nếu không có số lượng
             
             if unit not in ['ngày', 'giờ']:
                 bot.reply_to(message, "Đơn vị không hợp lệ. Chỉ chấp nhận `ngày` hoặc `giờ`.", parse_mode='Markdown')
