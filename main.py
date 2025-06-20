@@ -87,8 +87,8 @@ def load_user_data():
                         user_info['subscribed_games'] = [current_subscribed_games] if current_subscribed_games else []
                     elif not isinstance(current_subscribed_games, list):
                         user_info['subscribed_games'] = [] # Đảm bảo là list
-                    user_info.setdefault('is_banned', False) # <-- ĐÃ THÊM DÒNG NÀY
-                    user_info.setdefault('ban_reason', None) # <-- ĐÃ THÊM DÒNG NÀY
+                    user_info.setdefault('is_banned', False) 
+                    user_info.setdefault('ban_reason', None) 
             except json.JSONDecodeError:
                 print(f"Lỗi đọc {DATA_FILE}. Khởi tạo lại dữ liệu người dùng.")
                 user_data = {}
@@ -384,7 +384,7 @@ def prediction_loop(stop_event: Event):
                     user_id = int(user_id_str)
                     
                     # Bỏ qua nếu người dùng bị cấm
-                    if user_info.get('is_banned', False): # <-- ĐÃ THÊM KIỂM TRA
+                    if user_info.get('is_banned', False): 
                         continue
 
                     # Kiểm tra người dùng có muốn nhận dự đoán cho game này không
@@ -422,7 +422,7 @@ def prediction_loop(stop_event: Event):
                 print(f"🎮 KẾT QUẢ VÀ DỰ ĐOÁN CHO {config['name']}")
                 print(f"Phiên hiện tại: `{expect}` | Kết quả: {ket_qua_tx} (Tổng: {tong})")
                 print(f"🔢 Phiên tiếp theo: `{next_expect}`")
-                print(f"🤖 Dự đoán: {du_doan_cuoi_cung}") # Đã sửa lỗi chính tả ở đây
+                print(f"🤖 Dự đoán: {du_doan_cuoi_cung}") 
                 print(f"📌 Lý do: {ly_do}")
                 print(f"Lịch sử TX ({tx_history_length} phiên): {''.join(tx_history_for_game)}")
                 print("-" * 50)
@@ -453,8 +453,8 @@ def send_welcome(message):
             'is_ctv': False,
             'is_paused_prediction': False, 
             'subscribed_games': [], 
-            'is_banned': False, # <-- Đảm bảo giá trị ban đầu
-            'ban_reason': None # <-- Đảm bảo giá trị ban đầu
+            'is_banned': False, 
+            'ban_reason': None 
         }
         save_user_data(user_data)
         bot.reply_to(message, 
@@ -466,8 +466,8 @@ def send_welcome(message):
         user_data[user_id]['username'] = username 
         user_data[user_id].setdefault('is_paused_prediction', False) 
         user_data[user_id].setdefault('subscribed_games', []) 
-        user_data[user_id].setdefault('is_banned', False) # <-- Đảm bảo giá trị ban đầu
-        user_data[user_id].setdefault('ban_reason', None) # <-- Đảm bảo giá trị ban đầu
+        user_data[user_id].setdefault('is_banned', False) 
+        user_data[user_id].setdefault('ban_reason', None) 
         save_user_data(user_data)
         bot.reply_to(message, "Bạn đã khởi động bot rồi. Dùng /help để xem các lệnh.")
 
@@ -515,9 +515,9 @@ def show_help(message):
             "👑 `/maucau [tên game]`: Hiển thị các mẫu cầu bot đã thu thập (xấu/đẹp).\n" 
             "👑 `/nhapcau <tên game>`: Nhập các mẫu cầu từ văn bản cho bot.\n" 
             "👑 `/kiemtra`: Kiểm tra thông tin tất cả người dùng bot.\n"
-            "👑 `/xoahan <id>`: Xóa số ngày còn lại của người dùng.\n" # <-- THÊM LỆNH NÀY
-            "👑 `/ban <id> [lý do]`: Cấm người dùng sử dụng bot.\n" # <-- THÊM LỆNH NÀY
-            "👑 `/unban <id>`: Bỏ cấm người dùng.\n" # <-- THÊM LỆNH NÀY
+            "👑 `/xoahan <id>`: Xóa số ngày còn lại của người dùng.\n" 
+            "👑 `/ban <id> [lý do]`: Cấm người dùng sử dụng bot.\n" 
+            "👑 `/unban <id>`: Bỏ cấm người dùng.\n" 
         )
     
     bot.reply_to(message, help_text, parse_mode='Markdown')
@@ -852,9 +852,9 @@ def use_code(message):
     user_data.setdefault(user_id, {})['expiry_date'] = new_expiry_date.strftime('%Y-%m-%d %H:%M:%S')
     user_data[user_id]['username'] = message.from_user.username or message.from_user.first_name
     user_data[user_id].setdefault('is_paused_prediction', False)
-    user_data[user_id].setdefault('subscribed_games', []) # Đảm bảo field này tồn tại
-    user_data[user_id].setdefault('is_banned', False) # Đảm bảo field này tồn tại
-    user_data[user_id].setdefault('ban_reason', None) # Đảm bảo field này tồn tại
+    user_data[user_id].setdefault('subscribed_games', []) 
+    user_data[user_id].setdefault('is_banned', False) 
+    user_data[user_id].setdefault('ban_reason', None) 
 
 
     GENERATED_CODES[code_str]['used_by'] = user_id
@@ -935,8 +935,8 @@ def extend_subscription(message):
             'is_ctv': False,
             'is_paused_prediction': False,
             'subscribed_games': [],
-            'is_banned': False, # <-- Đảm bảo giá trị ban đầu
-            'ban_reason': None # <-- Đảm bảo giá trị ban đầu
+            'is_banned': False, 
+            'ban_reason': None 
         }
         bot.send_message(message.chat.id, f"Đã tạo tài khoản mới cho user ID `{target_user_id_str}`.")
 
@@ -995,15 +995,15 @@ def add_ctv(message):
             'is_ctv': True,
             'is_paused_prediction': False,
             'subscribed_games': [],
-            'is_banned': False, # <-- Đảm bảo giá trị ban đầu
-            'ban_reason': None # <-- Đảm bảo giá trị ban đầu
+            'is_banned': False, 
+            'ban_reason': None 
         }
     else:
         user_data[target_user_id_str]['is_ctv'] = True
         user_data[target_user_id_str].setdefault('is_paused_prediction', False)
         user_data[target_user_id_str].setdefault('subscribed_games', [])
-        user_data[target_user_id_str].setdefault('is_banned', False) # <-- Đảm bảo giá trị ban đầu
-        user_data[target_user_id_str].setdefault('ban_reason', None) # <-- Đảm bảo giá trị ban đầu
+        user_data[target_user_id_str].setdefault('is_banned', False) 
+        user_data[target_user_id_str].setdefault('ban_reason', None) 
     
     save_user_data(user_data)
     bot.reply_to(message, f"Đã cấp quyền CTV cho user ID `{target_user_id_str}`.")
@@ -1051,7 +1051,7 @@ def send_broadcast(message):
     for user_id_str in list(user_data.keys()):
         try:
             # Không gửi thông báo broadcast cho người dùng đã tạm ngừng dự đoán HOẶC BỊ CẤM
-            if user_data[user_id_str].get('is_paused_prediction', False) or user_data[user_id_str].get('is_banned', False): # <-- ĐÃ THÊM KIỂM TRA
+            if user_data[user_id_str].get('is_paused_prediction', False) or user_data[user_id_str].get('is_banned', False): 
                 continue
             
             bot.send_message(int(user_id_str), f"📢 **THÔNG BÁO TỪ ADMIN** 📢\n\n{broadcast_text}", parse_mode='Markdown')
