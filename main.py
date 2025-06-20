@@ -303,7 +303,7 @@ def send_welcome(message):
         }
         save_user_data(user_data)
         bot.reply_to(message, 
-                     "Chào mừng bạn đến với **BOT DỰ ĐOÁN TÀI XỈU LUCKYWIn**!\n"
+                     "Chào mừng bạn đến với **BOT DỰ ĐOÁN TÀI XỈU LUCKYWIN**!\n"
                      "Hãy dùng lệnh /help để xem danh sách các lệnh hỗ trợ.", 
                      parse_mode='Markdown')
     else:
