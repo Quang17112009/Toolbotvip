@@ -320,12 +320,12 @@ def show_support(message):
 @bot.message_handler(commands=['gia'])
 def show_price(message):
     price_text = (
-        "📊 **BOT SUNWIN XIN THÔNG BÁO BẢNG GIÁ SUN BOT** 📊\n\n"
+        "📊 **BOT LUKYWIN XIN THÔNG BÁO BẢNG GIÁ SUN BOT** 📊\n\n"
         "💸 **20k**: 1 Ngày\n"
         "💸 **50k**: 1 Tuần\n"
         "💸 **80k**: 2 Tuần\n"
         "💸 **130k**: 1 Tháng\n\n"
-        "🤖 BOT SUN TỈ Lệ **85-92%**\n"
+        "🤖 BOT LUCK TỈ Lệ **85-92%**\n"
         "⏱️ ĐỌC 24/24\n\n"
         "Vui Lòng ib @heheviptool hoặc @Besttaixiu999 Để Gia Hạn"
     )
