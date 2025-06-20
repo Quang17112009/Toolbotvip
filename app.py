@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from threading import Thread
 
 # --- Cấu hình Bot ---
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE") # Lấy từ biến môi trường hoặc đặt trực tiếp
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "7658240012:AAFAZSC7ONQ1KRGNtskAUr-Pepuv4n7KjvE") # Lấy từ biến môi trường hoặc đặt trực tiếp
 ADMIN_IDS = [6915752059] # Thay thế bằng ID Admin thật của bạn
 DATA_FILE = 'user_data.json'
 bot = telebot.TeleBot(BOT_TOKEN)
