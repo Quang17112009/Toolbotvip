@@ -19,7 +19,7 @@ DATA_FILE = 'user_data.json'
 CAU_PATTERNS_FILE = 'cau_patterns.json'
 CODES_FILE = 'codes.json'
 
-# Cấu hình cho nhiều game
+# Cấu hình cho nhiều game (ĐÂY LÀ BIẾN CHÍNH XÁC: GAME_CONFIGS với S HOA)
 GAME_CONFIGS = {
     "luckywin": { 
         "api_url": "https://1.bot/GetNewLottery/LT_Taixiu",
@@ -63,7 +63,7 @@ GENERATED_CODES = {} # {code: {"value": 1, "type": "day", "used_by": null, "used
 
 # Quản lý trạng thái riêng biệt cho mỗi game (last_id, tx_history, last_checked_time)
 game_states = {}
-for game_id in GAME_CONFIGS.keys():
+for game_id in GAME_CONFIGS.keys(): # SỬA TỪ GAME_CONFIGs SANG GAME_CONFIGS
     game_states[game_id] = {
         "last_id": None,
         "tx_history": [],
@@ -113,7 +113,7 @@ def load_cau_patterns():
         CAU_PATTERNS = {}
     
     # Đảm bảo mỗi game có một entry trong CAU_PATTERNS
-    for game_id in GAME_CONFIGS.keys():
+    for game_id in GAME_CONFIGS.keys(): # SỬA TỪ GAME_CONFIGs SANG GAME_CONFIGS
         if game_id not in CAU_PATTERNS:
             CAU_PATTERNS[game_id] = {}
 
@@ -234,7 +234,7 @@ def get_pattern_prediction_adjustment(game_id, pattern_str):
 
 # --- Lấy dữ liệu từ API ---
 def lay_du_lieu(game_id):
-    config = GAME_CONFIGS.get(game_id)
+    config = GAME_CONFIGS.get(game_id) # SỬA TỪ GAME_CONFIGs SANG GAME_CONFIGS
     if not config:
         print(f"Lỗi: Cấu hình game '{game_id}' không tồn tại.")
         return None
@@ -297,7 +297,7 @@ def prediction_loop(stop_event: Event):
             time.sleep(10) 
             continue
 
-        for game_id, config in GAME_CONFIGS.items():
+        for game_id, config in GAME_CONFIGS.items(): # SỬA TỪ GAME_CONFIGs SANG GAME_CONFIGS
             current_game_state = game_states[game_id]
             current_time = time.time()
 
@@ -627,16 +627,16 @@ def toggle_game_subscription(message, game_id_to_toggle, enable: bool):
         if game_id_to_toggle not in user_info['subscribed_games']:
             user_info['subscribed_games'].append(game_id_to_toggle)
             save_user_data(user_data)
-            bot.reply_to(message, f"✅ Bạn đã bắt đầu nhận dự đoán cho **{GAME_CONFIGS[game_id_to_toggle]['name']}**.", parse_mode='Markdown')
+            bot.reply_to(message, f"✅ Bạn đã bắt đầu nhận dự đoán cho **{GAME_CONFIGS[game_id_to_toggle]['name']}**.", parse_mode='Markdown') # SỬA TỪ GAME_CONFIGs SANG GAME_CONFIGS
         else:
-            bot.reply_to(message, f"Bạn đã đang nhận dự đoán cho **{GAME_CONFIGs[game_id_to_toggle]['name']}** rồi.", parse_mode='Markdown')
+            bot.reply_to(message, f"Bạn đã đang nhận dự đoán cho **{GAME_CONFIGS[game_id_to_toggle]['name']}** rồi.", parse_mode='Markdown') # SỬA TỪ GAME_CONFIGs SANG GAME_CONFIGS
     else: # disable
         if game_id_to_toggle in user_info['subscribed_games']:
             user_info['subscribed_games'].remove(game_id_to_toggle)
             save_user_data(user_data)
-            bot.reply_to(message, f"❌ Bạn đã ngừng nhận dự đoán cho **{GAME_CONFIGS[game_id_to_toggle]['name']}**.", parse_mode='Markdown')
+            bot.reply_to(message, f"❌ Bạn đã ngừng nhận dự đoán cho **{GAME_CONFIGS[game_id_to_toggle]['name']}**.", parse_mode='Markdown') # SỬA TỪ GAME_CONFIGs SANG GAME_CONFIGS
         else:
-            bot.reply_to(message, f"Bạn không đang nhận dự đoán cho **{GAME_CONFIGS[game_id_to_toggle]['name']}**.", parse_mode='Markdown')
+            bot.reply_to(message, f"Bạn không đang nhận dự đoán cho **{GAME_CONFIGS[game_id_to_toggle]['name']}**.", parse_mode='Markdown') # SỬA TỪ GAME_CONFIGs SANG GAME_CONFIGS
 
 @bot.message_handler(commands=['dudoan'])
 def start_prediction_luckywin_command(message):
@@ -671,7 +671,7 @@ def stop_predictions(message):
         bot.reply_to(message, "⏸️ Bạn đã tạm ngừng nhận dự đoán cho **TẤT CẢ CÁC GAME** từ bot. Dùng `/continue` để tiếp tục.", parse_mode='Markdown')
     else: # Dừng một game cụ thể
         game_id = args[0].lower()
-        if game_id not in GAME_CONFIGS:
+        if game_id not in GAME_CONFIGS: # SỬA TỪ GAME_CONFIGs SANG GAME_CONFIGS
             bot.reply_to(message, "Tên game không hợp lệ. Vui lòng sử dụng `/stop` hoặc `/stop <luckywin/hitclub/sunwin>`.", parse_mode='Markdown')
             return
         
@@ -701,7 +701,7 @@ def continue_predictions(message):
         bot.reply_to(message, "▶️ Bạn đã tiếp tục nhận dự đoán cho **TẤT CẢ CÁC GAME** từ bot.", parse_mode='Markdown')
     else: # Tiếp tục một game cụ thể
         game_id = args[0].lower()
-        if game_id not in GAME_CONFIGS:
+        if game_id not in GAME_CONFIGS: # SỬA TỪ GAME_CONFIGs SANG GAME_CONFIGS
             bot.reply_to(message, "Tên game không hợp lệ. Vui lòng sử dụng `/continue` hoặc `/continue <luckywin/hitclub/sunwin>`.", parse_mode='Markdown')
             return
 
@@ -716,12 +716,12 @@ def show_cau_patterns_command(message):
         return
     
     args = telebot.util.extract_arguments(message.text).split()
-    if not args or args[0].lower() not in GAME_CONFIGS:
+    if not args or args[0].lower() not in GAME_CONFIGS: # SỬA TỪ GAME_CONFIGs SANG GAME_CONFIGS
         bot.reply_to(message, "Vui lòng chỉ định tên game (luckywin, hitclub hoặc sunwin). Ví dụ: `/maucau luckywin`", parse_mode='Markdown')
         return
     
     game_id = args[0].lower()
-    game_name = GAME_CONFIGS[game_id]['name']
+    game_name = GAME_CONFIGS[game_id]['name'] # SỬA TỪ GAME_CONFIGs SANG GAME_CONFIGS
 
     game_patterns = CAU_PATTERNS.get(game_id, {})
 
@@ -759,12 +759,12 @@ def prompt_import_patterns(message):
         return
     
     args = telebot.util.extract_arguments(message.text).split()
-    if not args or args[0].lower() not in GAME_CONFIGS:
+    if not args or args[0].lower() not in GAME_CONFIGS: # SỬA TỪ GAME_CONFIGs SANG GAME_CONFIGS
         bot.reply_to(message, "Vui lòng chỉ định tên game (luckywin, hitclub hoặc sunwin) để nhập cầu. Ví dụ: `/nhapcau luckywin`", parse_mode='Markdown')
         return
     
     game_id = args[0].lower()
-    game_name = GAME_CONFIGS[game_id]['name']
+    game_name = GAME_CONFIGS[game_id]['name'] # SỬA TỪ GAME_CONFIGs SANG GAME_CONFIGS
 
     markup = telebot.types.ForceReply(selective=True)
     msg = bot.reply_to(message, f"Vui lòng dán văn bản chứa mẫu cầu {game_name} (theo định dạng /maucau) vào đây:", reply_markup=markup)
@@ -804,7 +804,7 @@ def import_patterns_from_text(message, game_id):
     save_cau_patterns()
 
     bot.reply_to(message, 
-                 f"✅ Đã nhập mẫu cầu cho **{GAME_CONFIGS[game_id]['name']}** thành công!\n"
+                 f"✅ Đã nhập mẫu cầu cho **{GAME_CONFIGS[game_id]['name']}** thành công!\n" # SỬA TỪ GAME_CONFIGs SANG GAME_CONFIGS
                  f"Mới: {new_patterns_count} mẫu. Cập nhật: {updated_patterns_count} mẫu.",
                  parse_mode='Markdown')
 
@@ -894,7 +894,7 @@ def get_user_info(message):
     username = user_info.get('username', 'Không rõ')
     is_ctv_status = "Có" if is_ctv(int(target_user_id_str)) else "Không"
     is_paused_status = "Có" if user_info.get('is_paused_prediction', False) else "Không"
-    subscribed_games_list = [GAME_CONFIGS[g_id]['name'] for g_id in user_info.get('subscribed_games', []) if g_id in GAME_CONFIGS]
+    subscribed_games_list = [GAME_CONFIGS[g_id]['name'] for g_id in user_info.get('subscribed_games', []) if g_id in GAME_CONFIGS] # SỬA TỪ GAME_CONFIGs SANG GAME_CONFIGS
     subscribed_games_str = ", ".join(subscribed_games_list) if subscribed_games_list else "Không có"
     is_banned_status = "Có" if user_info.get('is_banned', False) else "Không" 
     ban_reason_text = user_info.get('ban_reason', 'Không có') if user_info.get('is_banned', False) else 'N/A' 
@@ -1170,7 +1170,7 @@ def check_all_users(message):
         is_banned_status = "BỊ CẤM" if info.get('is_banned') else "Bình thường" 
         ban_reason_text = f" (Lý do: {info.get('ban_reason', 'Không rõ')})" if info.get('is_banned') else "" 
         
-        subscribed_games_list = [GAME_CONFIGS[g_id]['name'] for g_id in info.get('subscribed_games', []) if g_id in GAME_CONFIGS]
+        subscribed_games_list = [GAME_CONFIGS[g_id]['name'] for g_id in info.get('subscribed_games', []) if g_id in GAME_CONFIGS] # SỬA TỪ GAME_CONFIGs SANG GAME_CONFIGS
         subscribed_games_str = ", ".join(subscribed_games_list) if subscribed_games_list else "Chưa đăng ký game nào"
 
         user_summary = (
